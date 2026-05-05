@@ -1,0 +1,20 @@
+name: CD Prod
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  plan-prod:
+    uses: ./.github/workflows/tfplan.yml
+    with:
+      environment: prod
+    secrets: inherit
+
+  apply-prod:
+    needs: [plan-prod]
+    uses: ./.github/workflows/tfapply.yml
+    with:
+      environment: prod
+    secrets: inherit

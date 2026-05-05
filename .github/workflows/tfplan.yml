@@ -1,0 +1,87 @@
+name: Terraform Plan
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: "Target environment (dev, preprod, prod)"
+        type: string
+        required: true
+
+env:
+  AWS_REGION: ap-southeast-2
+
+permissions:
+      id-token: write 
+      contents: read
+
+concurrency:
+  group: plan-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  terraform-plan:
+    name: Terraform Plan — ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsTerraformRole
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.10.0"
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: |
+          terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=statefiles/${{ inputs.environment }}/bedrock-gateway-recordedfuture.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}" \
+            -backend-config="dynamodb_table=${{ secrets.TF_LOCK_TABLE }}" \
+            -backend-config="encrypt=true"
+
+      - name: Terraform Validate
+        working-directory: terraform
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        working-directory: terraform
+        run: |
+          terraform plan \
+            -var-file="environments/${{ inputs.environment }}.tfvars" \
+            -out="${{ inputs.environment }}.tfplan" \
+            -no-color 2>&1 | tee plan_output.txt
+
+          # Surface plan exit code for summary
+          echo "tf_exit_code=${PIPESTATUS[0]}" >> $GITHUB_ENV
+      - name: Write plan to job summary
+        if: always()
+        run: |
+          PLAN=$(cat terraform/plan_output.txt)
+          TRUNCATED=${PLAN:0:60000}
+
+          echo "### Terraform Plan — \`${{ inputs.environment }}\`" >> $GITHUB_STEP_SUMMARY
+          echo ""                                                        >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |"                                         >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|"                                         >> $GITHUB_STEP_SUMMARY
+          echo "| Environment  | \`${{ inputs.environment }}\` |"        >> $GITHUB_STEP_SUMMARY
+          echo "| Triggered by | \`${{ github.actor }}\` |"              >> $GITHUB_STEP_SUMMARY
+          echo ""                                                        >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`hcl"                                               >> $GITHUB_STEP_SUMMARY
+          echo "$TRUNCATED"                                              >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`"                                                  >> $GITHUB_STEP_SUMMARY

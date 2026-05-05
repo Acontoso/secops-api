@@ -1,0 +1,955 @@
+openapi: 3.0.0
+info:
+  title: SOAR API
+  description: Security Orchestration, Automation and Response (SOAR) API for threat intelligence enrichment and automated blocking across multiple security platforms
+  version: 1.0.0
+  contact:
+    name: API Support
+  license:
+    name: MIT
+
+servers:
+  - url: https://soar-api.testing.com
+    description: Production server
+
+components:
+  securitySchemes:
+    CognitoAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: AWS Cognito JWT token required for all protected endpoints
+
+  schemas:
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Error message
+      required:
+        - error
+
+    HealthResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "API is healthy!"
+
+    # ========================
+    # Anomali Models
+    # ========================
+    AnomaliRequestPayload:
+      type: object
+      required:
+        - ioc
+        - incident_id
+      properties:
+        ioc:
+          type: string
+          description: Indicator of Compromise (IP, domain, hash)
+          example: "192.168.1.1"
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "123456"
+
+    AnomaliResponsePayload:
+      type: object
+      properties:
+        confidence:
+          type: string
+          description: Malicious confidence level
+          enum: [Critical, High, Medium, Low, None]
+          example: "High"
+        ioc_type:
+          type: string
+          description: Type of indicator
+          enum: [IPv4, IPv6, Domain, Hash]
+          example: "IPv4"
+        ioc:
+          type: string
+          description: The submitted indicator
+          example: "192.168.1.1"
+        score:
+          type: integer
+          description: Numerical risk score
+          example: 75
+
+    # ========================
+    # AbuseIPDB Models
+    # ========================
+    ClientAbuseIPRequestPayload:
+      type: object
+      required:
+        - ip
+        - incident_id
+      properties:
+        ip:
+          type: string
+          description: IP address to lookup
+          example: "203.0.113.45"
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "123456"
+
+    ClientAbuseIPResponsePayload:
+      type: object
+      properties:
+        confidence:
+          type: string
+          description: Malicious confidence level
+          enum: [High, Medium, Low]
+          example: "High"
+        abuse_confidence_score:
+          type: integer
+          description: AbuseIPDB confidence score (0-100)
+          minimum: 0
+          maximum: 100
+          example: 85
+        country:
+          type: string
+          description: Country code or name
+          example: "US"
+        report_count:
+          type: integer
+          description: Number of reports from community
+          example: 25
+        tor:
+          type: boolean
+          description: Whether IP is a known Tor exit node
+          example: false
+        private:
+          type: boolean
+          description: Whether IP is private/internal
+          example: false
+        ioc:
+          type: string
+          description: The submitted IP address
+          example: "203.0.113.45"
+        exists:
+          type: boolean
+          description: Whether the record exists in the database
+          example: true
+
+    ManualLookupIPRequestPayload:
+      type: object
+      required:
+        - ip
+      properties:
+        ip:
+          type: string
+          description: IP address to lookup
+          example: "203.0.113.45"
+
+    ManualAddAbuseIPPayload:
+      type: object
+      required:
+        - ip
+        - public
+        - abuse_confidence_score
+        - country
+        - country_code
+        - report_count
+        - incident_id
+      properties:
+        ip:
+          type: string
+          description: IP address to add
+          example: "203.0.113.45"
+        public:
+          type: boolean
+          description: Whether the IP is public
+          example: true
+        abuse_confidence_score:
+          type: integer
+          description: Abuse confidence score (0-100)
+          minimum: 0
+          maximum: 100
+          example: 85
+        country:
+          type: string
+          description: Country name
+          example: "United States"
+        country_code:
+          type: string
+          description: ISO country code
+          example: "US"
+        report_count:
+          type: integer
+          description: Number of abuse reports
+          example: 15
+        incident_id:
+          type: string
+          description: Incident identifier
+          example: "123456"
+
+    ManualAddAbuseIPResponse:
+      type: object
+      properties:
+        Added:
+          type: boolean
+          example: true
+
+    # ========================
+    # Recorded Future Models
+    # ========================
+    RecordSOARRequestPayload:
+      type: object
+      required:
+        - incident_id
+      properties:
+        ips:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: List of IP addresses to check
+          example: ["192.0.2.1", "192.0.2.2"]
+        domains:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: List of domains to check
+          example: ["example.com"]
+        hashes:
+          type: array
+          maxItems: 10
+          items:
+            type: string
+          description: List of file hashes to check
+          example: ["d41d8cd98f00b204e9800998ecf8427e"]
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "123456"
+
+    RecordSOARResponsePayload:
+      type: object
+      properties:
+        score:
+          type: integer
+          description: Risk score from Recorded Future
+          example: 65
+        ioc:
+          type: string
+          description: The submitted indicator
+          example: "192.0.2.1"
+        success:
+          type: boolean
+          description: Whether the lookup was successful
+          example: true
+
+    RecordSOARResponseSummary:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 3
+        succeeded:
+          type: integer
+          example: 2
+        failed:
+          type: integer
+          example: 1
+
+    RecordSOARBatchResponsePayload:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecordSOARResponsePayload'
+        summary:
+          $ref: '#/components/schemas/RecordSOARResponseSummary'
+
+    # ========================
+    # Zscaler Models
+    # ========================
+    SSEUploadRequestPayload:
+      type: object
+      required:
+        - iocs
+        - incident_id
+      properties:
+        iocs:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+          description: List of indicators to block
+          example: ["192.0.2.100", "192.0.2.101"]
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "123456"
+
+    SSEUploadResponsePayload:
+      type: object
+      properties:
+        added:
+          type: boolean
+          description: Whether the IOC was successfully added
+          example: true
+        ioc:
+          type: string
+          description: The submitted indicator
+          example: "192.0.2.100"
+        integration:
+          type: string
+          description: Integration platform
+          enum: [Zscaler]
+          example: "Zscaler"
+        action:
+          type: string
+          description: Action taken
+          example: "Block"
+
+    SSEUploadSummary:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 5
+        succeeded:
+          type: integer
+          example: 4
+        failed:
+          type: integer
+          example: 1
+
+    SSEUploadBatchResponsePayload:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/SSEUploadResponsePayload'
+        summary:
+          $ref: '#/components/schemas/SSEUploadSummary'
+
+    # ========================
+    # Azure AD Models
+    # ========================
+    AzureADCARequestPayload:
+      type: object
+      required:
+        - ioc
+        - incident_id
+        - tenant_id
+        - list_id
+        - list_name
+      properties:
+        ioc:
+          type: string
+          description: IP address to block in Conditional Access
+          example: "192.0.2.200"
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "INC-12345"
+        tenant_id:
+          type: string
+          description: Azure AD tenant ID
+          example: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        list_id:
+          type: string
+          description: Conditional Access named location list ID
+          example: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        list_name:
+          type: string
+          description: Conditional Access named location list name
+          example: "SOAR-API-Locations"
+
+    IPRange:
+      type: object
+      properties:
+        '@odata.type':
+          type: string
+          example: "#microsoft.graph.iPv4CidrRange"
+        cidrAddress:
+          type: string
+          example: "192.0.2.0/24"
+
+    AzureADCAResponsePayload:
+      type: object
+      properties:
+        action:
+          type: string
+          description: Action taken
+          example: "Block"
+        ioc:
+          type: string
+          description: The submitted IP address
+          example: "192.0.2.200"
+        list_name:
+          type: string
+          description: List name where IP was added
+          example: "SOAR-API-Locations"
+        ipRanges:
+          type: array
+          items:
+            $ref: '#/components/schemas/IPRange'
+
+    # ========================
+    # DATP/Defender Models
+    # ========================
+    DATPUploadRequestPayload:
+      type: object
+      required:
+        - ioc
+        - incident_id
+        - action
+        - tenant_id
+      properties:
+        ioc:
+          type: string
+          description: Indicator to add to DATP
+          example: "192.0.2.50"
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "123456"
+        action:
+          type: string
+          description: Action to take on the indicator
+          enum: [Block, Audit, BlockAndRemediate]
+          example: "Block"
+        tenant_id:
+          type: string
+          description: Azure tenant ID
+          example: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+
+    DATPUploadResponsePayload:
+      type: object
+      properties:
+        added:
+          type: boolean
+          description: Whether the indicator was successfully added
+          example: true
+        ioc:
+          type: string
+          description: The submitted indicator
+          example: "192.0.2.50"
+        platform:
+          type: string
+          description: Platform name
+          enum: [DATP]
+          example: "DATP"
+        action:
+          type: string
+          description: Action applied
+          enum: [Block, Audit, BlockAndRemediate]
+          example: "Block"
+
+    # ========================
+    # Cloudflare Models
+    # ========================
+    CloudflareBlockIPRequestPayload:
+      type: object
+      required:
+        - ips
+        - incident_id
+        - action
+        - account_names
+      properties:
+        ips:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: string
+          description: IP addresses to block
+          example: ["192.0.2.1", "192.0.2.2"]
+        incident_id:
+          type: string
+          description: Incident identifier for tracking
+          example: "123456"
+        action:
+          type: string
+          description: Action to take
+          enum: [Block]
+          example: "Block"
+        account_names:
+          type: array
+          items:
+            type: string
+          description: Cloudflare account names to apply blocking
+          example: ["account-1", "account-2"]
+
+    CloudflareBlockIPResponsePayload:
+      type: object
+      properties:
+        added:
+          type: boolean
+          description: Whether the IP was successfully blocked
+          example: true
+        ioc:
+          type: string
+          description: The IP address
+          example: "192.0.2.1"
+        accounts:
+          type: string
+          description: Cloudflare account
+          example: "account-1"
+        action:
+          type: string
+          description: Action applied
+          example: "Block"
+
+    CloudflareBlockIPSummary:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 2
+        succeeded:
+          type: integer
+          example: 2
+        failed:
+          type: integer
+          example: 0
+
+    CloudflareBlockIPBatchResponsePayload:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/CloudflareBlockIPResponsePayload'
+        summary:
+          $ref: '#/components/schemas/CloudflareBlockIPSummary'
+
+security:
+  - CognitoAuth: []
+
+paths:
+  /:
+    get:
+      operationId: getHealthRoot
+      summary: Health check endpoint
+      description: Returns a simple health status message
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /health:
+    get:
+      operationId: getHealth
+      summary: Health check endpoint
+      description: Returns a simple health status message
+      tags:
+        - Health
+      security: []
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /api/enrich/ipabusedb:
+    post:
+      operationId: lookupIPAbuseDB
+      summary: Lookup IP in AbuseIPDB
+      description: Enriches an IP address by checking it against the AbuseIPDB database. Returns abuse confidence score and associated metadata. Requires valid IP address (public IPs only).
+      tags:
+        - Enrichment
+        - AbuseIPDB
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ClientAbuseIPRequestPayload'
+      responses:
+        '200':
+          description: IP lookup successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAbuseIPResponsePayload'
+        '400':
+          description: Bad request - invalid IP or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Bad gateway - AbuseIPDB service error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/enrich/ipabusedb/manual:
+    post:
+      operationId: manualLookupIPAbuseDB
+      summary: Manual IP lookup without API call
+      description: Looks up an IP address only from the local cache/database without making an external API call to AbuseIPDB.
+      tags:
+        - Enrichment
+        - AbuseIPDB
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualLookupIPRequestPayload'
+      responses:
+        '200':
+          description: IP lookup from cache successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientAbuseIPResponsePayload'
+        '400':
+          description: Bad request - invalid IP or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/enrich/ipabusedb/create:
+    post:
+      operationId: createIPAbuseDB
+      summary: Manually add IP to database
+      description: Manually adds an IP address with abuse metadata to the local cache/database for future lookups.
+      tags:
+        - Enrichment
+        - AbuseIPDB
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ManualAddAbuseIPPayload'
+      responses:
+        '200':
+          description: IP successfully added to database
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ManualAddAbuseIPResponse'
+        '400':
+          description: Bad request - invalid data or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error - database write failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/enrich/anomali:
+    post:
+      operationId: lookupAnomali
+      summary: Lookup IOC in Anomali
+      description: Enriches an indicator of compromise (IP, domain, or hash) by checking it against the Anomali threat intelligence database.
+      tags:
+        - Enrichment
+        - Anomali
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AnomaliRequestPayload'
+      responses:
+        '200':
+          description: IOC lookup successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnomaliResponsePayload'
+        '400':
+          description: Bad request - invalid IOC or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Bad gateway - Anomali service error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/enrich/recordedfuture:
+    post:
+      operationId: lookupRecordedFuture
+      summary: Lookup IOCs in Recorded Future
+      description: Enriches multiple indicators (IPs, domains, hashes) by checking them against the Recorded Future threat intelligence database. Supports batch operations up to 10 indicators per request.
+      tags:
+        - Enrichment
+        - RecordedFuture
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordSOARRequestPayload'
+      responses:
+        '200':
+          description: IOC lookup successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordSOARBatchResponsePayload'
+        '400':
+          description: Bad request - invalid IOCs or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error - database lookup failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/soar/sse/zscaler:
+    post:
+      operationId: blockZscaler
+      summary: Block IOCs in Zscaler SSE
+      description: Adds one or more indicators to Zscaler's Security Service Edge (SSE) blocklist for automated traffic filtering. Requires valid Zscaler API credentials configured in AWS SSM.
+      tags:
+        - SOAR Actions
+        - Zscaler
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SSEUploadRequestPayload'
+      responses:
+        '200':
+          description: IOCs successfully processed and added to Zscaler
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSEUploadBatchResponsePayload'
+        '400':
+          description: Bad request - invalid IOCs or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error - Zscaler client not configured
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Bad gateway - Zscaler API error or credential retrieval failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/soar/azuread/ca:
+    post:
+      operationId: blockAzureADConditionalAccess
+      summary: Block IP in Azure AD Conditional Access
+      description: Adds an IP address to an Azure AD Conditional Access named location list for automatic blocking of authentication attempts from that IP.
+      tags:
+        - SOAR Actions
+        - Azure AD
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AzureADCARequestPayload'
+      responses:
+        '200':
+          description: IP successfully added to Azure AD Conditional Access list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AzureADCAResponsePayload'
+        '400':
+          description: Bad request - invalid IP, tenant ID, or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error - database or configuration failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Bad gateway - Azure AD Graph API error or credential retrieval failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/soar/datp/blockioc:
+    post:
+      operationId: blockDefenderATP
+      summary: Block IOC in Windows Defender ATP
+      description: Adds an indicator to Microsoft Defender for Endpoint (formerly DATP) with specified action (Block, Audit, or BlockAndRemediate) for automated threat prevention.
+      tags:
+        - SOAR Actions
+        - Defender
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DATPUploadRequestPayload'
+      responses:
+        '200':
+          description: IOC successfully added to Defender for Endpoint
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DATPUploadResponsePayload'
+        '400':
+          description: Bad request - invalid IOC, action, or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error - database or configuration failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '502':
+          description: Bad gateway - Defender API error or credential retrieval failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /api/soar/waf/blockip:
+    post:
+      operationId: blockCloudflareWAF
+      summary: Block IPs in Cloudflare WAF
+      description: Adds one or more IP addresses to Cloudflare WAF rules across specified accounts for automated DDoS mitigation and threat blocking.
+      tags:
+        - SOAR Actions
+        - Cloudflare
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CloudflareBlockIPRequestPayload'
+      responses:
+        '200':
+          description: IPs successfully added to Cloudflare WAF
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CloudflareBlockIPBatchResponsePayload'
+        '400':
+          description: Bad request - invalid IPs, accounts, or validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized - invalid or missing authentication token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error - database or configuration failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+tags:
+  - name: Health
+    description: Health check endpoints
+  - name: Enrichment
+    description: Threat intelligence enrichment endpoints
+  - name: AbuseIPDB
+    description: AbuseIPDB IP reputation service
+  - name: Anomali
+    description: Anomali threat intelligence service
+  - name: RecordedFuture
+    description: Recorded Future threat intelligence service
+  - name: SOAR Actions
+    description: Automated response actions across security platforms
+  - name: Zscaler
+    description: Zscaler Security Service Edge (SSE) integration
+  - name: Azure AD
+    description: Azure Active Directory Conditional Access integration
+  - name: Defender
+    description: Microsoft Defender for Endpoint (DATP) integration
+  - name: Cloudflare
+    description: Cloudflare WAF integration

@@ -1,0 +1,62 @@
+name: Deploy Dev And Release
+
+# on:
+#   push:
+#     branches:
+#       - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  deploy-dev:
+    name: Deploy to Dev
+    uses: ./.github/workflows/tfapply.yml
+    with:
+      environment: dev
+    secrets: inherit
+
+  approval-gate:
+    name: Approve Release
+    needs: [deploy-dev]
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - name: Await approval
+        run: echo "Approved. Proceeding to semantic release."
+
+  create-semantic-release:
+    name: Create Semantic Release Tag
+    needs: [approval-gate]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install release dependencies
+        run: |
+          npm install --no-save \
+            semantic-release \
+            @semantic-release/commit-analyzer \
+            @semantic-release/release-notes-generator \
+            @semantic-release/github
+
+      - name: Run semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          npx semantic-release \
+            --branches main \
+            --plugins @semantic-release/commit-analyzer @semantic-release/release-notes-generator @semantic-release/github

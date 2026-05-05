@@ -1,0 +1,81 @@
+name: Docker
+# on:
+#   release:
+#     types: [published]
+
+env:
+  AWS_REGION: "ap-southeast-2"
+
+permissions:
+      id-token: write   # This is required for requesting the JWT
+      contents: read    # This is required for actions/checkout
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    name: Docker Build & SAST
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build the Docker image
+      run: |
+        docker build -f Dockerfile -t testing:latest .
+    
+    - name: Run Snyk to check Docker image for vulnerabilities
+      uses: snyk/actions/docker@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        image: testing:latest
+        args: --severity-threshold=high
+
+  publish:
+    runs-on: ubuntu-latest
+    outputs:
+      VERSION: ${{steps.get_version.outputs.VERSION}}
+    name: Publish
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Get the version
+      id: get_version
+      run: echo ::set-output name=VERSION::${GITHUB_REF/refs\/tags\//}
+
+    - name: Install AWS Signer
+      run: |
+        wget https://d2hvyiie56hcat.cloudfront.net/linux/amd64/installer/deb/latest/aws-signer-notation-cli_amd64.deb
+        sudo dpkg -i -E aws-signer-notation-cli_amd64.deb
+
+    - name: Configure AWS credentials (OIDC)
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/GitHubActionsTerraformRoleArtefact
+        aws-region: ${{ env.AWS_REGION }}
+
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    - name: Build & Push
+      id: push
+      env:
+        REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        docker build -f Dockerfile -t ${{secrets.REGISTRY}}/${{secrets.REPOSITORY}}:${{steps.get_version.outputs.VERSION}} .
+        docker push ${{secrets.REGISTRY}}/${{secrets.REPOSITORY}}:${{steps.get_version.outputs.VERSION}}
+        IMAGE_SHA=$(aws ecr describe-images --repository-name ${{secrets.REPOSITORY}} --image-ids imageTag=${{steps.get_version.outputs.VERSION}} --query 'imageDetails[].imageDigest' --output text)
+        echo "::set-output name=image_sha::$IMAGE_SHA"
+      # AWS now supports the ability to sign your images directly when stored in ECR, referencing the AWS signer ARN to sign the image instead of doing during CICD
+    - name: Sign image with key
+      env:
+        REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        export NOTATION_USERNAME=AWS
+        export NOTATION_PASSWORD=$(aws ecr get-login-password --region ap-southeast-2)
+        notation sign ${{env.REGISTRY}}/${{env.REPOSITORY}}:${{steps.get_version.outputs.VERSION}} --plugin "com.amazonaws.signer.notation.plugin" --id "arn:aws:signer:${{env.AWS_REGION}}:12345678912:/signing-profiles/container_image_signing"
+
+    - name: Logout of Amazon ECR
+      if: always()
+      run: docker logout ${{steps.login-ecr.outputs.registry}}

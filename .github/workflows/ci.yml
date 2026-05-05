@@ -1,0 +1,79 @@
+name: CI
+
+#on:
+
+#   pull_request:
+#     branches:
+#       - main
+
+env:
+  AWS_REGION: ap-southeast-2
+
+jobs:
+
+  detect-changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+
+    outputs:
+      terraform: ${{ steps.filter.outputs.terraform }}
+      code: ${{ steps.filter.outputs.code }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Check changed paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            terraform:
+              - 'terraform/**'
+            code:
+              - 'code/*.go'
+              - 'code/**/*.go'
+              - 'code/go.mod'
+
+  SAST-Test:
+    name: Snyk SAST
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go 1.21.x
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.21.x'
+
+      - name: Compile code to check for errors
+        run: |
+          cd code/
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o bootstrap
+    
+      - name: Run Snyk to check for vulnerabilities
+        uses: snyk/actions/golang@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+
+      - name: Run Snyk Terraform Scan
+        uses: snyk/actions/iac@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          file: terraform
+          args: --severity-threshold=high
+
+  call-terraform-plan-dev:
+    name: Call Terraform Plan
+    needs: [detect-changes]
+    if: |
+      needs.detect-changes.outputs.terraform == 'true'
+    uses: ./.github/workflows/tfplan.yml
+    with:
+      environment: dev
+    secrets: inherit
