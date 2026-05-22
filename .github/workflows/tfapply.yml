@@ -72,7 +72,7 @@ jobs:
           echo ""                                                        >> $GITHUB_STEP_SUMMARY
           echo "| Key | Value |"                                         >> $GITHUB_STEP_SUMMARY
           echo "|-----|-------|"                                         >> $GITHUB_STEP_SUMMARY
-          echo "| Environment  | \`${{ inputs.environment }}\` |"       >> $GITHUB_STEP_SUMMARY
+          echo "| Environment  | \`${{ inputs.environment }}\` |"        >> $GITHUB_STEP_SUMMARY
           echo "| Triggered by | \`${{ github.actor }}\` |"              >> $GITHUB_STEP_SUMMARY
           echo ""                                                        >> $GITHUB_STEP_SUMMARY
           echo "\`\`\`hcl"                                               >> $GITHUB_STEP_SUMMARY

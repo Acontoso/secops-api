@@ -4,6 +4,12 @@ name: Deploy Dev And Release
 #   push:
 #     branches:
 #       - main
+#   workflow_dispatch:
+#     inputs:
+#       reason:
+#         description: "Reason for manual run (e.g. transient failure retry)"
+#         required: false
+#         default: "Manual rerun"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -28,11 +34,19 @@ jobs:
     environment: release
     steps:
       - name: Await approval
-        run: echo "Approved. Proceeding to semantic release."
+        run: echo "Approved. Proceeding to production deployment."
+
+  deploy-prod:
+    name: Deploy to Prod
+    needs: [approval-gate]
+    uses: ./.github/workflows/tfapply.yml
+    with:
+      environment: prod
+    secrets: inherit
 
   create-semantic-release:
     name: Create Semantic Release Tag
-    needs: [approval-gate]
+    needs: [deploy-prod]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout full history
