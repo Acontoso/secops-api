@@ -58,6 +58,9 @@ func (a *App) CloudflareBlock(c *gin.Context) {
 	// Below defines the channel to pass CloudflareIOCResult structs
 	results := make(chan CloudflareIOCResult, len(accounts))
 	// Process each account concurrently, straight away called by go func(), anon function in this case.
+	// Go manages the execution of the go-routines, standard per each new connection (socket design)
+	// Schedules on pool of OS threads, if all threads are busy it will wait until one is free, so no risk of too many go routines being created.
+	// Schedules runable routines and when blocked, sechuled routines are paused until they are runnable again, so if waiting on network response it will be paused until response is back, then it will be runnable again and scheduled to run.
 	for _, account := range accounts {
 		go func(account string) {
 			result, err := a.blockIPCloudflare(c, iocs, incidentId, account, existingRecords, lg)
