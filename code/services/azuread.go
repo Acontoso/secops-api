@@ -24,8 +24,8 @@ import (
 
 var WH_TENANTID string = os.Getenv("TENANT_ID")
 var MA_TENANTID string = os.Getenv("TENANT_ID_MA")
-var WESHEALTH_GRAPH_AZ_CLIENT_ID string = os.Getenv("WESHEALTH_GRAPH_AZ_CLIENT_ID")
-var WESHEALTH_MA_GRAPH_AZ_CLIENT_ID string = os.Getenv("WESHEALTH_MA_GRAPH_AZ_CLIENT_ID")
+var GRAPH_AZ_CLIENT_ID string = os.Getenv("GRAPH_AZ_CLIENT_ID")
+var MA_GRAPH_AZ_CLIENT_ID string = os.Getenv("MA_GRAPH_AZ_CLIENT_ID")
 var WH_LIST_ID string = os.Getenv("WH_LIST_ID")
 var MA_LIST_ID string = os.Getenv("MA_LIST_ID")
 var LISTNAME string = os.Getenv("LISTNAME")
@@ -108,14 +108,14 @@ func updateCAList(c *gin.Context, ioc, tenantID, listID string, cognitoClient *c
 	var ca AzureADCA
 	if tenantID == WH_TENANTID {
 		ca = AzureADCA{
-			clientID: WESHEALTH_GRAPH_AZ_CLIENT_ID,
+			clientID: GRAPH_AZ_CLIENT_ID,
 			ListID:   WH_LIST_ID,
 			TenantID: WH_TENANTID,
 		}
 	}
 	if tenantID == MA_TENANTID {
 		ca = AzureADCA{
-			clientID: WESHEALTH_MA_GRAPH_AZ_CLIENT_ID,
+			clientID: MA_GRAPH_AZ_CLIENT_ID,
 			ListID:   MA_LIST_ID,
 			TenantID: MA_TENANTID,
 		}

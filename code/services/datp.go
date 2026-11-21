@@ -18,7 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-var WESHEALTH_SECURITY_AZ_CLIENT_ID string = "id"
+var SECURITY_AZ_CLIENT_ID string = "id"
 var SCOPE_DATP string = "https://api.securitycenter.windows.com/.default"
 
 func UploadIOCToDATP(c *gin.Context, ioc string, tenantID string, action models.Action, incidentID string, cognitoClient *cognitoidentity.Client, lg *slog.Logger) (bool, error) {
@@ -28,7 +28,7 @@ func UploadIOCToDATP(c *gin.Context, ioc string, tenantID string, action models.
 func uploadIOCToDATP(c *gin.Context, ioc, tenantID string, action models.Action, incidentID string, cognitoClient *cognitoidentity.Client, lg *slog.Logger, newClient azureAssertionFactory, httpClient *http.Client) (bool, error) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
-	azureClient, err := newClient(c, WESHEALTH_SECURITY_AZ_CLIENT_ID, tenantID, cognitoClient, lg)
+	azureClient, err := newClient(c, SECURITY_AZ_CLIENT_ID, tenantID, cognitoClient, lg)
 	if err != nil {
 		lg.Error("failed to create Azure AD client", "error", err)
 		return false, err

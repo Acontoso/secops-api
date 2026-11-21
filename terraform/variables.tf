@@ -74,7 +74,7 @@ variable "integration_environment" {
   default     = {}
   validation {
     condition = alltrue([for key in keys(var.integration_environment) : contains([
-      "TENANT_ID", "TENANT_ID_MA", "WESHEALTH_GRAPH_AZ_CLIENT_ID", "WESHEALTH_MA_GRAPH_AZ_CLIENT_ID",
+      "TENANT_ID", "TENANT_ID_MA", "GRAPH_AZ_CLIENT_ID", "MA_GRAPH_AZ_CLIENT_ID",
       "WH_LIST_ID", "MA_LIST_ID", "LISTNAME"
     ], key)])
     error_message = "Only the documented nonsecret integration setting names are supported."
