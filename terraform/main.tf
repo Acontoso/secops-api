@@ -1,193 +1,178 @@
+data "aws_partition" "current" {}
+
 locals {
-  tags = merge(
-    {
-      "env"        = "${var.environment}"
-      "terraform"  = "true"
-      "bu"         = "security"
-      "RepoUrl"    = "${var.source_code_repo_url}"
-      "service"    = "soar-api"
-      "owner"      = "patrick-robertson"
-      "author"     = "alex skoro"
-      "costcentre" = "${var.cost_centre}"
-    }
-  )
-  aws_region = "ap-southeast-2"
+  name         = "${var.project}-${var.environment}"
+  partition    = data.aws_partition.current.partition
+  ssm_prefix   = "/${var.project}/${var.environment}"
+  ssm_arn      = "arn:${local.partition}:ssm:${var.aws_region}:${var.account_id}:parameter${local.ssm_prefix}/*"
+  identity_arn = "arn:${local.partition}:cognito-identity:${var.aws_region}:${var.account_id}:identitypool/${var.identity_pool_id}"
+  tags = merge(var.tags, {
+    Project     = var.project
+    Environment = var.environment
+    ManagedBy   = "Terraform"
+  })
+  openapi = yamldecode(var.openapi_schema)
 }
 
-data "aws_kms_key" "ssm_kms_alias" {
-  key_id = "alias/cmk-ssm"
-}
-
-module "sns" {
-  source         = "./modules/sns"
-  sns_topic_name = var.sns_topic_name
-  tags           = local.tags
-}
-
-module "ssm_parameters" {
-  source     = "./modules/ssm"
-  kms_key_id = data.aws_kms_key.ssm_kms_alias.id
-  tags       = local.tags
-
-  parameters = {
-    anomali_user = {
-      name        = "/soar-api/anomali_user"
-      description = "Anomali username for API integration"
-      value       = var.enc_string_anomali_user
+data "aws_iam_policy_document" "service_key" {
+  statement {
+    sid       = "EnableAccountIAMPermissions"
+    actions   = ["kms:*"]
+    resources = ["*"]
+    principals {
+      type        = "AWS"
+      identifiers = ["arn:${local.partition}:iam::${var.account_id}:root"]
     }
-
-    anomali_api = {
-      name        = "/soar-api/anomali_api"
-      description = "Anomali API key for integration"
-      value       = var.enc_string_anomali_api
+  }
+  statement {
+    sid       = "CloudWatchAlarmNotifications"
+    actions   = ["kms:Decrypt", "kms:GenerateDataKey*"]
+    resources = ["*"]
+    principals {
+      type        = "Service"
+      identifiers = ["cloudwatch.amazonaws.com"]
     }
-
-    ipabuse_db = {
-      name        = "/soar-api/ipabuse_db"
-      description = "IPAbuse DB API Key"
-      value       = var.enc_string_ipabuse_db
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceAccount"
+      values   = [var.account_id]
     }
-
-    zscaler_client_id = {
-      name        = "/soar-api/zscaler_client_id"
-      description = "Zscaler Client ID for API integration"
-      value       = var.enc_zscaler_client_id
-    }
-
-    zscaler_client_secret = {
-      name        = "/soar-api/zscaler_client_secret"
-      description = "Zscaler Client Secret for API integration"
-      value       = var.enc_zscaler_client_secret
-    }
-
-    recorded_future_api = {
-      name        = "/soar-api/recorded_future_api"
-      description = "Recorded Future API key for integration"
-      value       = var.enc_recorded_future_api
-    }
-
-    cf_is_token = {
-      name        = "/soar-api/Instantscripts"
-      description = "Cloudflare IS API Token"
-      value       = var.enc_cf_api_is_token
-    }
-
-    cf_myapidev_token = {
-      name        = "/soar-api/MyAPIDev"
-      description = "Cloudflare MyAPI Dev Token"
-      value       = var.enc_cf_api_myapidev_token
-    }
-
-    cf_myapiprod_token = {
-      name        = "/soar-api/MyAPIProd"
-      description = "Cloudflare MyAPI Prod Token"
-      value       = var.enc_cf_api_myapiprod_token
-    }
-
-    cf_madev_token = {
-      name        = "/soar-api/MADev"
-      description = "Cloudflare MA Dev Token"
-      value       = var.enc_cf_api_madev_token
-    }
-
-    cf_maprod_token = {
-      name        = "/soar-api/MAProd"
-      description = "Cloudflare MA Prod Token"
-      value       = var.enc_cf_api_maprod_token
-    }
-
-    cf_pricelinedev_token = {
-      name        = "/soar-api/PricelineDev"
-      description = "Cloudflare Priceline Dev Token"
-      value       = var.enc_cf_api_pricelinedev_token
-    }
-
-    cf_pricelineprod_token = {
-      name        = "/soar-api/PricelineProd"
-      description = "Cloudflare Priceline Prod Token"
-      value       = var.enc_cf_api_pricelineprod_token
-    }
-
-    cf_sisudev_token = {
-      name        = "/soar-api/SiSUDev"
-      description = "Cloudflare SISU Dev Token"
-      value       = var.enc_cf_api_sisudev_token
-    }
-
-    cf_sisuprod_token = {
-      name        = "/soar-api/SiSUProd"
-      description = "Cloudflare SISU Prod Token"
-      value       = var.enc_cf_api_sisuprod_token
+    condition {
+      test     = "ArnLike"
+      variable = "aws:SourceArn"
+      values   = ["arn:${local.partition}:cloudwatch:${var.aws_region}:${var.account_id}:alarm:${local.name}*"]
     }
   }
 }
 
-module "cognito" {
-  source                  = "./modules/cognito"
+resource "aws_kms_key" "service" {
+  description             = "${local.name} data and notification encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 30
+  policy                  = data.aws_iam_policy_document.service_key.json
   tags                    = local.tags
-  cognito_oidc_userpool   = var.cognito_oidc_userpool
-  cognito_domain_name     = var.cognito_domain_name
-  cognito_oidc_client_app = var.cognito_oidc_client_app
-  identity_pool_name      = var.identity_pool_name
 }
 
-module "dynamodb" {
-  source                       = "./modules/dynamodb"
-  tags                         = local.tags
-  dynamodb_table_name_ioc      = var.dynamodb_table_name_ioc
-  dynamodb_primary_key_ioc     = var.dynamodb_primary_key_ioc
-  dynamodb_sort_key_ioc        = var.dynamodb_sort_key_ioc
-  dynamodb_table_name_actions  = var.dynamodb_table_name_actions
-  dynamodb_primary_key_actions = var.dynamodb_primary_key_actions
-  dynamodb_sort_key_actions    = var.dynamodb_sort_key_actions
+resource "aws_kms_alias" "service" {
+  name          = "alias/${local.name}"
+  target_key_id = aws_kms_key.service.key_id
 }
 
-module "lambda" {
-  source                       = "./modules/lambda"
-  tags                         = local.tags
-  lambda_function_name         = var.lambda_function_name
-  runtime                      = var.runtime
-  handler                      = var.handler
-  memory_size                  = var.memory_size
-  timeout                      = var.timeout
-  description                  = var.description
-  sns_topic_arn                = module.sns.sns_arn
-  s3_bucket_name               = var.s3_bucket_name
-  ms_tenant_id                 = var.ms_tenant_id
-  identity_pool_id             = var.identity_pool_id
-  identity_pool_login          = var.identity_pool_login
-  cognito_identity_pool_arn    = module.cognito.cognito_identity_pool_arn
-  dynamodb_table_name_ioc      = var.dynamodb_table_name_ioc
-  dynamodb_primary_key_ioc     = var.dynamodb_primary_key_ioc
-  dynamodb_sort_key_ioc        = var.dynamodb_sort_key_ioc
-  dynamodb_table_name_actions  = var.dynamodb_table_name_actions
-  dynamodb_primary_key_actions = var.dynamodb_primary_key_actions
-  dynamodb_sort_key_actions    = var.dynamodb_sort_key_actions
-  dynamodb_table_arn_ioc       = module.dynamodb.ioc_table_arn
-  dynamodb_table_arn_actions   = module.dynamodb.actions_table_arn
+module "notifications" {
+  source                   = "./modules/sns"
+  name                     = "${local.name}-notifications"
+  alarm_source_arn_pattern = "arn:${local.partition}:cloudwatch:${var.aws_region}:${var.account_id}:alarm:${local.name}-*"
+  kms_key_arn              = aws_kms_key.service.arn
+  subscriptions            = var.notification_subscriptions
+  tags                     = local.tags
 }
 
-module "apigateway" {
-  source                        = "./modules/apigateway"
-  tags                          = local.tags
-  api_gateway_name              = var.api_gateway_name
-  api_rate_limit                = var.api_rate_limit
-  api_burst_limit               = var.api_burst_limit
-  api_gateway_usage_plan_name   = var.api_gateway_usage_plan_name
-  aws_lambda_function_name      = module.lambda.lambda_function_name
-  stage_name_api_gateway        = var.stage_name_api_gateway
-  apigw_cognito_authorizer_name = var.apigw_cognito_authorizer_name
-  cognito_user_pool_arn         = module.cognito.aws_cognito_user_pool_arn
-  aws_lambda_function_arn       = module.lambda.lambda_function_arn
+module "ioc_table" {
+  source                         = "./modules/dynamodb"
+  name                           = "${local.name}-ioc"
+  hash_key                       = "IOC"
+  range_key                      = "EnrichmentSource"
+  attributes                     = { IOC = "S", EnrichmentSource = "S", IOCType = "S", Date = "S", IncidentID = "S", MaliciousConfidence = "S" }
+  deletion_protection_enabled    = var.deletion_protection_enabled
+  point_in_time_recovery_enabled = true
+  kms_key_arn                    = aws_kms_key.service.arn
+  global_secondary_indexes = [
+    { name = "IOCTypeDate", hash_key = "IOCType", range_key = "Date", projection_type = "ALL" },
+    { name = "IOCTypeConfidence", hash_key = "IOCType", range_key = "MaliciousConfidence", projection_type = "ALL" },
+    { name = "IOCTypeIncident", hash_key = "IOCType", range_key = "IncidentID", projection_type = "ALL" }
+  ]
+  tags = local.tags
 }
 
-module "bedrockgateway" {
-  source                      = "./modules/bedrockgateway"
-  tags                        = local.tags
-  gateway_name                = var.gateway_name
-  gateway_description         = var.gateway_description
-  authorization_type          = var.authorization_type
-  tenant_id                   = var.tenant_id
-  audience_values             = var.audience_values
-  arn_oauth_outbound_provider = var.arn_oauth_outbound_provider
+module "actions_table" {
+  source                         = "./modules/dynamodb"
+  name                           = "${local.name}-actions"
+  hash_key                       = "IOC"
+  range_key                      = "Integration"
+  attributes                     = { IOC = "S", Integration = "S", IncidentID = "S", Date = "S" }
+  deletion_protection_enabled    = var.deletion_protection_enabled
+  point_in_time_recovery_enabled = true
+  kms_key_arn                    = aws_kms_key.service.arn
+  global_secondary_indexes = [
+    { name = "IOCIncident", hash_key = "IOC", range_key = "IncidentID", projection_type = "ALL" },
+    { name = "IOCDate", hash_key = "IOC", range_key = "Date", projection_type = "ALL" }
+  ]
+  tags = local.tags
+}
+
+module "authorization" {
+  source = "./modules/cognito"
+  name   = local.name
+  domain = "${local.name}-${var.account_id}"
+  tags   = local.tags
+}
+
+module "function" {
+  source                         = "./modules/lambda"
+  name                           = local.name
+  image_uri                      = var.image_uri
+  architecture                   = "x86_64"
+  memory_size                    = var.memory_size
+  timeout                        = 28
+  reserved_concurrent_executions = var.reserved_concurrent_executions
+  log_retention_days             = var.log_retention_days
+  tracing_enabled                = true
+  failure_notifications_enabled  = true
+  failure_topic_arn              = module.notifications.topic_arn
+  tags                           = local.tags
+  environment_variables = merge(var.integration_environment, {
+    GIN_MODE                    = "release"
+    IOC_TABLE_NAME              = module.ioc_table.name
+    IOC_TABLE_HASH_KEY          = "IOC"
+    IOC_TABLE_SORT_KEY          = "EnrichmentSource"
+    SOAR_ACTIONS_TABLE_NAME     = module.actions_table.name
+    SOAR_ACTIONS_TABLE_HASH_KEY = "IOC"
+    SOAR_ACTIONS_SORT_KEY       = "Integration"
+    IDENTITY_POOL_ID            = var.identity_pool_id
+    IDENTITY_POOL_LOGIN         = var.identity_pool_login
+    SSM_PARAMETER_PREFIX        = local.ssm_prefix
+    COGNITO_USER_POOL_ID        = module.authorization.user_pool_id
+    COGNITO_CLIENT_ID           = module.authorization.client_id
+    COGNITO_REQUIRED_SCOPE      = module.authorization.authorization_scope
+  })
+  policy_statements = [
+    { sid = "ReadVendorParameters", actions = ["ssm:GetParameter"], resources = [local.ssm_arn] },
+    { sid = "DecryptVendorCredentials", actions = ["kms:Decrypt"], resources = distinct([var.ssm_kms_key_arn, var.application_kms_key_arn]) },
+    { sid = "UseEncryptedApplicationData", actions = ["kms:Decrypt", "kms:GenerateDataKey"], resources = [aws_kms_key.service.arn] },
+    { sid = "PublishNotifications", actions = ["sns:Publish"], resources = [module.notifications.topic_arn] },
+    {
+      sid       = "ReadWriteApplicationTables", actions = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem"],
+      resources = [module.ioc_table.arn, "${module.ioc_table.arn}/index/*", module.actions_table.arn, "${module.actions_table.arn}/index/*"]
+    },
+    { sid = "ExternalDeveloperIdentity", actions = ["cognito-identity:GetOpenIdTokenForDeveloperIdentity"], resources = [local.identity_arn] }
+  ]
+}
+
+module "api" {
+  source                = "./modules/apigateway"
+  name                  = local.name
+  stage_name            = var.environment
+  lambda_function_name  = module.function.function_name
+  lambda_invoke_arn     = module.function.invoke_arn
+  cognito_user_pool_arn = module.authorization.user_pool_arn
+  authorization_scopes  = [module.authorization.authorization_scope]
+  rate_limit            = var.api_rate_limit
+  burst_limit           = var.api_burst_limit
+  log_retention_days    = var.log_retention_days
+  tracing_enabled       = true
+  cloudwatch_role_arn   = var.api_cloudwatch_role_arn
+  tags                  = local.tags
+}
+
+module "agentcore" {
+  count              = var.agentcore == null ? 0 : 1
+  source             = "./modules/bedrockgateway"
+  name               = "${local.name}-gateway"
+  openapi_schema     = jsonencode(merge(local.openapi, { servers = [{ url = module.api.invoke_url }] }))
+  discovery_url      = var.agentcore.discovery_url
+  audiences          = var.agentcore.audiences
+  oauth_provider_arn = var.agentcore.oauth_provider_arn
+  oauth_secret_arn   = var.agentcore.oauth_secret_arn
+  oauth_scopes       = [module.authorization.authorization_scope]
+  tags               = local.tags
 }

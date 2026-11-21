@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/Acontoso/soar-api/code/models"
@@ -21,7 +22,9 @@ var ZSCALER_SOAR_FQDN_LIST string = "9999988"
 var ZSCALER_SOAR_IP_LIST string = "9999999"
 var SCOPE string = "api://id/.default"
 
-// AbuseIPDBClient wraps HTTP access to the AbuseIPDB API with timeouts.
+const zscalerDefaultBaseURL = "https://zsapi.zscalerdc.net/api/v1/ipDestinationGroups"
+
+// ZscalerClient wraps HTTP access to the Zscaler API with timeouts.
 type ZscalerClient struct {
 	HTTP    *http.Client
 	BaseURL string
@@ -32,7 +35,7 @@ type ZscalerClient struct {
 func NewZscalerClient() *ZscalerClient {
 	return &ZscalerClient{
 		HTTP:    &http.Client{Timeout: 30 * time.Second},
-		BaseURL: "https://zsapi.zscalerdc.net/api/v1/ipDestinationGroups",
+		BaseURL: zscalerDefaultBaseURL,
 		Timeout: 30 * time.Second,
 	}
 }
@@ -41,10 +44,8 @@ type ZscalerResponse struct {
 	Confidence int `json:"average_confidence"`
 }
 
-// BlockIOC queries Zscaler for a single IOC.
+// BlockIOC adds a single IOC to the appropriate Zscaler destination group.
 func (zscaler *ZscalerClient) BlockIOC(c *gin.Context, ioc string, accessToken string, lg *slog.Logger) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, zscaler.Timeout)
-	defer cancel()
 	if zscaler.HTTP == nil {
 		zscaler.HTTP = &http.Client{Timeout: 30 * time.Second}
 	}
@@ -52,30 +53,35 @@ func (zscaler *ZscalerClient) BlockIOC(c *gin.Context, ioc string, accessToken s
 		zscaler.Timeout = 30 * time.Second
 	}
 	if zscaler.BaseURL == "" {
-		zscaler.BaseURL = "https://zsapi.zscalerdc.net/api/v1/ipDestinationGroups"
+		zscaler.BaseURL = zscalerDefaultBaseURL
 	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), zscaler.Timeout)
+	defer cancel()
 
-	var reqURL string
+	var listID string
 	var body models.ZscalerAddPayload
 	iocType := models.IOCClassifier(ioc)
-	if iocType == "Domain" {
-		list_id := ZSCALER_SOAR_FQDN_LIST
-		reqURL = fmt.Sprintf("https://zsapi.zscalerdc.net/api/v1/ipDestinationGroups/%s", list_id)
+	switch iocType {
+	case "Domain":
+		listID = ZSCALER_SOAR_FQDN_LIST
 		body = models.ZscalerAddPayload{
 			Addresses: []string{ioc},
 			Type:      "DSTN_FQDN",
 			Name:      "SOAR Malicious Domain List",
 		}
-	}
-	if iocType == "IPv4" || iocType == "IPv6" {
-		list_id := ZSCALER_SOAR_IP_LIST
-		reqURL = fmt.Sprintf("https://zsapi.zscalerdc.net/api/v1/ipDestinationGroups/%s", list_id)
+	case "IPv4", "IPv6":
+		listID = ZSCALER_SOAR_IP_LIST
 		body = models.ZscalerAddPayload{
 			Addresses: []string{ioc},
 			Type:      "DSTN_IP",
 			Name:      "SOAR Malicious IP Address List",
 		}
+	default:
+		err := fmt.Errorf("unsupported Zscaler IOC type %q for %q", iocType, ioc)
+		lg.Error("unsupported Zscaler IOC type", "type", iocType, "ioc", ioc)
+		return false, err
 	}
+	reqURL := strings.TrimRight(zscaler.BaseURL, "/") + "/" + listID
 
 	parsedURL, err := url.Parse(reqURL)
 	if err != nil {
@@ -173,8 +179,15 @@ func (zscaler *ZscalerClient) BlockIOC(c *gin.Context, ioc string, accessToken s
 	return false, fmt.Errorf("Zscaler request failed after retries")
 }
 
+// ActivateChange activates pending Zscaler configuration changes.
 func ActivateChange(c *gin.Context, accessToken string, lg *slog.Logger) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, 30*time.Second)
+	return activateChangeWithClient(c, accessToken, lg, &http.Client{Timeout: 30 * time.Second})
+}
+
+// activateChangeWithClient is the private seam that lets tests supply an
+// offline HTTP client while the public entry point keeps its production default.
+func activateChangeWithClient(c *gin.Context, accessToken string, lg *slog.Logger, client *http.Client) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	endpoint := "https://zsapi.zscalerdc.net/api/v1/status/activate"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
@@ -184,7 +197,7 @@ func ActivateChange(c *gin.Context, accessToken string, lg *slog.Logger) (bool, 
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
-	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false, err
 	}

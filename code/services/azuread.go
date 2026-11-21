@@ -22,7 +22,6 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// var TENANTID string = os.Getenv("TENANT_ID")
 var WH_TENANTID string = os.Getenv("TENANT_ID")
 var MA_TENANTID string = os.Getenv("TENANT_ID_MA")
 var WESHEALTH_GRAPH_AZ_CLIENT_ID string = os.Getenv("WESHEALTH_GRAPH_AZ_CLIENT_ID")
@@ -96,18 +95,25 @@ func NewAzureADClientAssertion(c *gin.Context, clientID string, tenantID string,
 
 }
 
-func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, ssmClient *ssm.Client, kmsClient *kms.Client, cognitoClient *cognitoidentity.Client, lg *slog.Logger) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, 20*time.Second)
+type azureAssertionFactory func(*gin.Context, string, string, *cognitoidentity.Client, *slog.Logger) (*AzureADClient, error)
+
+func UpdateCAList(c *gin.Context, ioc string, tenantID string, listID string, ssmClient *ssm.Client, kmsClient *kms.Client, cognitoClient *cognitoidentity.Client, lg *slog.Logger) (bool, error) {
+	return updateCAList(c, ioc, tenantID, listID, cognitoClient, lg, NewAzureADClientAssertion,
+		&http.Client{Timeout: 20 * time.Second}, &http.Client{Timeout: 15 * time.Second})
+}
+
+func updateCAList(c *gin.Context, ioc, tenantID, listID string, cognitoClient *cognitoidentity.Client, lg *slog.Logger, newClient azureAssertionFactory, getClient, patchClient *http.Client) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
 	var ca AzureADCA
-	if tenant_id == WH_TENANTID {
+	if tenantID == WH_TENANTID {
 		ca = AzureADCA{
 			clientID: WESHEALTH_GRAPH_AZ_CLIENT_ID,
 			ListID:   WH_LIST_ID,
 			TenantID: WH_TENANTID,
 		}
 	}
-	if tenant_id == MA_TENANTID {
+	if tenantID == MA_TENANTID {
 		ca = AzureADCA{
 			clientID: WESHEALTH_MA_GRAPH_AZ_CLIENT_ID,
 			ListID:   MA_LIST_ID,
@@ -115,7 +121,7 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 		}
 
 	}
-	client, err := NewAzureADClientAssertion(c, ca.clientID, ca.TenantID, cognitoClient, lg)
+	client, err := newClient(c, ca.clientID, ca.TenantID, cognitoClient, lg)
 	if err != nil {
 		lg.Error("Failed to create AzureAD client", "error", err)
 		return false, err
@@ -125,7 +131,7 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 		lg.Error("Failed to get access token secret", "error", err)
 		return false, err
 	}
-	getURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/%s", list_id)
+	getURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/%s", listID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, getURL, nil)
 	if err != nil {
 		lg.Error("Failed to create get named location request", "error", err)
@@ -133,7 +139,7 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	resp, err := getClient.Do(req)
 	if err != nil {
 		lg.Error("Failed to get named location", "error", err)
 		return false, err
@@ -144,6 +150,10 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 	if err != nil {
 		lg.Error("Failed to read GET response body", "error", err)
 		return false, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		lg.Error("AzureAD non-2xx:", "status", resp.Status, "body", string(bodyBytes))
+		return false, fmt.Errorf("AzureAD non-2xx: %s - %s", resp.Status, string(bodyBytes))
 	}
 
 	var location models.NamedLocation
@@ -158,8 +168,7 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 		existingIPRanges = append(existingIPRanges, location.IPRanges...)
 	}
 
-	iocWithCIDR := ioc
-	iocWithCIDR = ioc + "/32"
+	iocWithCIDR := ioc + "/32"
 	newIP := models.IPRange{
 		OdataType:   "#microsoft.graph.iPv4CidrRange",
 		CIDRAddress: iocWithCIDR,
@@ -184,7 +193,7 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 		lg.Error("Failed to marshal update payload to JSON", "error", err)
 		return false, err
 	}
-	updateURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/%s", list_id)
+	updateURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/identity/conditionalAccess/namedLocations/%s", listID)
 	req, err = http.NewRequestWithContext(ctx, http.MethodPatch, updateURL, bytes.NewBuffer(buf))
 	if err != nil {
 		lg.Error("Failed to create update named location request", "error", err)
@@ -192,7 +201,7 @@ func UpdateCAList(c *gin.Context, ioc string, tenant_id string, list_id string, 
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
 	req.Header.Set("Content-Type", "application/json")
-	resp, err = (&http.Client{Timeout: 15 * time.Second}).Do(req)
+	resp, err = patchClient.Do(req)
 	if err != nil {
 		lg.Error("Failed to update named location", "error", err)
 		return false, err

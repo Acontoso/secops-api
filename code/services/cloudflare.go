@@ -20,26 +20,34 @@ func NewCloudflareClient(apiToken string) (*cloudflare.API, error) {
 	return cloudflare.NewWithAPIToken(apiToken)
 }
 
-// CheckIP queries AbuseIPDB for a single IP.
+type cloudflareClientFactory func(apiToken string) (*cloudflare.API, error)
+
+// CloudflareAddIP adds an IP to the Cloudflare list for the given account.
 func CloudflareAddIP(c *gin.Context, ip string, account string, incidentID string, ssmClient *ssm.Client, kmsClient *kms.Client, lg *slog.Logger) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, 30*time.Second)
+	return cloudflareAddIP(c, ip, account, incidentID, ssmClient, kmsClient, lg, NewCloudflareClient)
+}
+
+// cloudflareAddIP is the private seam that accepts an SDK client factory so the
+// create/poll/list workflow can run against an offline transport in tests.
+func cloudflareAddIP(c *gin.Context, ip string, account string, incidentID string, ssmClient *ssm.Client, kmsClient *kms.Client, lg *slog.Logger, newClient cloudflareClientFactory) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 	accountID, ok := AccountIDMap[account]
-	if !ok {
+	if !ok || accountID == "" {
 		lg.Error("Cloudflare account not found in map", "account", account)
-		return false, nil
+		return false, fmt.Errorf("cloudflare account %q not configured", account)
 	}
 	list, ok := ListMap[account]
-	if !ok {
+	if !ok || list == "" {
 		lg.Error("Cloudflare list not found in map", "account", account)
-		return false, nil
+		return false, fmt.Errorf("cloudflare list for account %q not configured", account)
 	}
 	cloudflareAPIToken, err := GetParam(c, ssmClient, kmsClient, account, lg)
 	if err != nil {
 		lg.Error("failed to get cloudflare api token", "error", err)
-		return false, nil
+		return false, err
 	}
-	api, err := NewCloudflareClient(cloudflareAPIToken)
+	api, err := newClient(cloudflareAPIToken)
 	if err != nil {
 		lg.Error("failed to create cloudflare client", "error", err)
 		return false, err

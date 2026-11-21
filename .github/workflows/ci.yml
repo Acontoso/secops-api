@@ -1,92 +1,123 @@
 name: CI
 
-#on:
+on:
+  pull_request:
+    branches: [main]
+  workflow_call:
+    outputs:
+      image_digest:
+        description: Manifest digest of the tested OCI image
+        value: ${{ jobs.build-image.outputs.digest }}
 
-#   pull_request:
-#     branches:
-#       - main
+permissions:
+  contents: read
 
 env:
-  AWS_REGION: ap-southeast-2
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  TG_TF_PATH: terraform
+  TG_TF_FORWARD_STDOUT: 'true'
+  GOTOOLCHAIN: local
+  AWS_EC2_METADATA_DISABLED: 'true'
 
 jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.14'
+          cache-dependency-path: code/go.sum
+      - run: make test
 
-  detect-changes:
-    name: Detect Changes
-    runs-on: ubuntu-latest
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.25.14'
+          cache-dependency-path: code/go.sum
+      - uses: ./.github/actions/setup-infra
+      - name: Lint workflows
+        run: go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+      - run: make lint
 
+  build-image:
+    name: Build OCI image
+    needs: [test, lint]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
     outputs:
-      terraform: ${{ steps.filter.outputs.terraform }}
-      code: ${{ steps.filter.outputs.code }}
-
+      digest: ${{ steps.image.outputs.digest }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Check changed paths
-        uses: dorny/paths-filter@v3
-        id: filter
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          filters: |
-            terraform:
-              - 'terraform/**'
-            code:
-              - 'code/*.go'
-              - 'code/**/*.go'
-              - 'code/go.mod'
-
-  SAST-Test:
-    name: Snyk SAST
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Go 1.21.x
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.21.x'
-
-      - name: Compile code to check for errors
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build and inspect single-platform image
+        id: image
         run: |
-          cd code/
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o bootstrap
-    
-      - name: Run Snyk to check for vulnerabilities
-        uses: snyk/actions/golang@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+          make image-oci
+          digest="$(python3 .github/scripts/image.py inspect dist/image.tar)"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          args: --severity-threshold=high
+          name: oci-${{ github.sha }}-${{ github.run_id }}
+          path: dist/image.tar
+          compression-level: 0
+          retention-days: 2
+          overwrite: true
+          if-no-files-found: error
 
-      - name: Run Snyk Terraform Scan
-        uses: snyk/actions/iac@master
-        if: needs.detect-changes.outputs.terraform == 'true'
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+  plan-dev:
+    name: Plan dev
+    needs: build-image
+    if: >-
+      (github.event_name == 'pull_request' &&
+       github.event.pull_request.head.repo.full_name == github.repository) ||
+      (github.event_name != 'pull_request' && github.ref == 'refs/heads/main')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: dev-plan
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TG_IMAGE_DIGEST: ${{ needs.build-image.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          file: terraform
-          args: --severity-threshold=high
-
-  call-terraform-plan-dev:
-    name: Call Terraform Plan
-    needs: [detect-changes]
-    if: |
-      needs.detect-changes.outputs.terraform == 'true' && github.event.workflow_run.event == 'pull_request'
-    uses: ./.github/workflows/tfplan.yml
-    with:
-      environment: dev
-      ref: ${{ github.event.workflow_run.head_sha }}
-    secrets: inherit
-
-  call-terraform-plan-prod:
-    name: Call Terraform Plan Production
-    needs: [detect-changes]
-    if: |
-      needs.detect-changes.outputs.terraform == 'true' && github.event.workflow_run.event == 'pull_request'
-    uses: ./.github/workflows/tfplan.yml
-    with:
-      environment: prod
-      ref: ${{ github.event.workflow_run.head_sha }}
-    secrets: inherit
+          persist-credentials: false
+      - uses: ./.github/actions/setup-infra
+        with:
+          environment: dev
+          variables: ${{ toJSON(vars) }}
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.TG_AWS_REGION }}
+          allowed-account-ids: ${{ env.TG_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Save dev plan
+        run: |
+          make plan ENV=dev
+          python3 .github/scripts/plan.py record dev
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plan-dev-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            dist/plans/dev.tfplan
+            dist/plans/dev.json
+          retention-days: 2
+          overwrite: true
+          if-no-files-found: error

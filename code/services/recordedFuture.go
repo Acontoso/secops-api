@@ -31,56 +31,48 @@ func NewFutureClient() *FutureClient {
 	}
 }
 
+// enrichmentPayload builds the category-specific body. An unsupported IOC type
+// produces a nil body, matching the original request behaviour.
+func enrichmentPayload(ioc, iocType string) ([]byte, error) {
+	var payload models.RecordFutureAPICallSOAR
+	switch iocType {
+	case "IPv4", "IPv6":
+		payload.IP = []string{ioc}
+	case "Domain":
+		payload.Domain = []string{ioc}
+	case "SHA1", "SHA256", "MD5":
+		payload.Hash = []string{ioc}
+	default:
+		return nil, nil
+	}
+	return json.Marshal(payload)
+}
+
 // GetRecordedFutureEnrichment queries Recorded Future for a single IOC.
 func (future *FutureClient) GetRecordedFutureEnrichment(c *gin.Context, ioc string, ssmClient *ssm.Client, kmsClient *kms.Client, lg *slog.Logger) (int, error) {
-	ctx, cancel := context.WithTimeout(c, future.Timeout)
-	defer cancel()
 	if future.HTTP == nil {
 		future.HTTP = &http.Client{Timeout: 15 * time.Second}
 	}
 	if future.Timeout <= 0 {
 		future.Timeout = 15 * time.Second
 	}
-	baseUrl := "https://api.recordedfuture.com/soar/v3/enrichment"
+	ctx, cancel := context.WithTimeout(c.Request.Context(), future.Timeout)
+	defer cancel()
+	baseURL := future.BaseURL
+	if baseURL == "" {
+		baseURL = "https://api.recordedfuture.com/soar/v3/enrichment"
+	}
 	// Build URL with query parameters
-	parsedURL, err := url.Parse(baseUrl)
+	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
 		lg.Error("failed to parse base url", "error", err)
 		return 0, err
 	}
 	finalURL := parsedURL.String()
-	iocType := models.IOCClassifier(ioc)
-	var payloadBytes []byte
-	if iocType == "IPv4" || iocType == "IPv6" {
-		payload := models.RecordFutureAPICallSOAR{
-			IP: []string{ioc},
-		}
-		var err error
-		payloadBytes, err = json.Marshal(payload)
-		if err != nil {
-			lg.Error("failed to marshal payload", "error", err)
-			return 0, err
-		}
-	} else if iocType == "Domain" {
-		payload := models.RecordFutureAPICallSOAR{
-			Domain: []string{ioc},
-		}
-		var err error
-		payloadBytes, err = json.Marshal(payload)
-		if err != nil {
-			lg.Error("failed to marshal payload", "error", err)
-			return 0, err
-		}
-	} else if iocType == "SHA1" || iocType == "SHA256" || iocType == "MD5" {
-		payload := models.RecordFutureAPICallSOAR{
-			Hash: []string{ioc},
-		}
-		var err error
-		payloadBytes, err = json.Marshal(payload)
-		if err != nil {
-			lg.Error("failed to marshal payload", "error", err)
-			return 0, err
-		}
+	payloadBytes, err := enrichmentPayload(ioc, models.IOCClassifier(ioc))
+	if err != nil {
+		lg.Error("failed to marshal payload", "error", err)
+		return 0, err
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, finalURL, bytes.NewBuffer(payloadBytes))
 	if err != nil {

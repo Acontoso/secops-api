@@ -22,9 +22,13 @@ var WESHEALTH_SECURITY_AZ_CLIENT_ID string = "id"
 var SCOPE_DATP string = "https://api.securitycenter.windows.com/.default"
 
 func UploadIOCToDATP(c *gin.Context, ioc string, tenantID string, action models.Action, incidentID string, cognitoClient *cognitoidentity.Client, lg *slog.Logger) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, 20*time.Second)
+	return uploadIOCToDATP(c, ioc, tenantID, action, incidentID, cognitoClient, lg, NewAzureADClientAssertion, &http.Client{Timeout: 20 * time.Second})
+}
+
+func uploadIOCToDATP(c *gin.Context, ioc, tenantID string, action models.Action, incidentID string, cognitoClient *cognitoidentity.Client, lg *slog.Logger, newClient azureAssertionFactory, httpClient *http.Client) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
-	azureClient, err := NewAzureADClientAssertion(c, WESHEALTH_SECURITY_AZ_CLIENT_ID, tenantID, cognitoClient, lg)
+	azureClient, err := newClient(c, WESHEALTH_SECURITY_AZ_CLIENT_ID, tenantID, cognitoClient, lg)
 	if err != nil {
 		lg.Error("failed to create Azure AD client", "error", err)
 		return false, err
@@ -35,7 +39,7 @@ func UploadIOCToDATP(c *gin.Context, ioc string, tenantID string, action models.
 		return false, err
 	}
 	iocType := models.IOCClassifier(ioc)
-	indicator, err := checkIndicatorDATP(c, ioc, accessToken, iocType, lg)
+	indicator, err := checkIndicatorDATPWithClient(c, ioc, accessToken, iocType, lg, httpClient)
 	if err != nil {
 		lg.Error("Failed to check indicator in DATP", "error", err)
 		return false, err
@@ -76,7 +80,7 @@ func UploadIOCToDATP(c *gin.Context, ioc string, tenantID string, action models.
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		lg.Error("DATP request failed", "error", err)
 		return false, err
@@ -91,7 +95,11 @@ func UploadIOCToDATP(c *gin.Context, ioc string, tenantID string, action models.
 }
 
 func checkIndicatorDATP(c *gin.Context, ioc string, accessToken string, iocType string, lg *slog.Logger) (bool, error) {
-	ctx, cancel := context.WithTimeout(c, 20*time.Second)
+	return checkIndicatorDATPWithClient(c, ioc, accessToken, iocType, lg, &http.Client{Timeout: 20 * time.Second})
+}
+
+func checkIndicatorDATPWithClient(c *gin.Context, ioc, accessToken, iocType string, lg *slog.Logger, httpClient *http.Client) (bool, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
 	datpType := convertToDATPIOC(iocType)
 	if datpType == "" {
@@ -116,7 +124,7 @@ func checkIndicatorDATP(c *gin.Context, ioc string, accessToken string, iocType 
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := (&http.Client{Timeout: 20 * time.Second}).Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		lg.Error("DATP request failed", "error", err)
 		return false, err

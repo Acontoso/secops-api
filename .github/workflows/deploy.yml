@@ -1,0 +1,221 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Includes approval waiting time. Never interrupt an active Terraform apply.
+concurrency:
+  group: secops-api-release
+  cancel-in-progress: false
+
+env:
+  TF_IN_AUTOMATION: 'true'
+  TF_INPUT: 'false'
+  TG_TF_PATH: terraform
+  TG_TF_FORWARD_STDOUT: 'true'
+  AWS_EC2_METADATA_DISABLED: 'true'
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  ci:
+    name: CI
+    if: github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      id-token: write
+
+  publish-image:
+    name: Publish shared image
+    needs: ci
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TG_IMAGE_DIGEST: ${{ needs.ci.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Configure dev role and shared ECR
+        env:
+          DEPLOY_ENV: dev
+          VARS_JSON: ${{ toJSON(vars) }}
+        run: python3 .github/scripts/configure.py
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.TG_AWS_REGION }}
+          allowed-account-ids: ${{ env.TG_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: oci-${{ github.sha }}-${{ github.run_id }}
+          path: dist
+      - name: Publish CI artifact without rebuilding
+        run: |
+          bash .github/scripts/assert-main.sh
+          sudo apt-get update && sudo apt-get install --no-install-recommends --yes skopeo
+          python3 .github/scripts/image.py publish dist/image.tar
+
+  deploy-dev:
+    name: Deploy dev
+    needs: [ci, publish-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TG_IMAGE_DIGEST: ${{ needs.ci.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-infra
+        with:
+          environment: dev
+          variables: ${{ toJSON(vars) }}
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.TG_AWS_REGION }}
+          allowed-account-ids: ${{ env.TG_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: plan-dev-${{ github.sha }}-${{ github.run_id }}
+          path: dist/plans
+      - name: Apply saved dev plan
+        run: |
+          python3 .github/scripts/plan.py verify dev
+          bash .github/scripts/assert-main.sh
+          make apply ENV=dev
+      - name: Verify dev
+        run: bash .github/scripts/verify-deployment.sh dev
+
+  version-image:
+    name: Version verified image
+    needs: [ci, deploy-dev]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: dev
+    permissions:
+      contents: write
+      id-token: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+    env:
+      IMAGE_DIGEST: ${{ needs.ci.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Configure dev role and shared ECR
+        env:
+          DEPLOY_ENV: dev
+          VARS_JSON: ${{ toJSON(vars) }}
+        run: python3 .github/scripts/configure.py
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.TG_AWS_REGION }}
+          allowed-account-ids: ${{ env.TG_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Tag the dev-tested digest using Conventional Commits
+        id: release
+        run: |
+          bash .github/scripts/assert-main.sh
+          python3 .github/scripts/release.py
+
+  plan-prod:
+    name: Plan prod
+    needs: [ci, version-image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    environment: prod-plan
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TG_IMAGE_DIGEST: ${{ needs.ci.outputs.image_digest }}
+      RELEASE_VERSION: ${{ needs.version-image.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-infra
+        with:
+          environment: prod
+          variables: ${{ toJSON(vars) }}
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.TG_AWS_REGION }}
+          allowed-account-ids: ${{ env.TG_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - name: Resolve release version and save prod plan
+        run: |
+          bash .github/scripts/assert-main.sh
+          python3 .github/scripts/image.py resolve
+          make plan ENV=prod
+          python3 .github/scripts/plan.py record prod
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: plan-prod-${{ github.sha }}-${{ github.run_id }}
+          path: |
+            dist/plans/prod.tfplan
+            dist/plans/prod.json
+          retention-days: 2
+          overwrite: true
+          if-no-files-found: error
+
+  deploy-prod:
+    name: Approve and deploy prod
+    needs: [ci, version-image, plan-prod]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    # Required reviewers belong HERE, after the saved plan is available.
+    environment: prod
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      TG_IMAGE_DIGEST: ${{ needs.ci.outputs.image_digest }}
+      RELEASE_VERSION: ${{ needs.version-image.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-infra
+        with:
+          environment: prod
+          variables: ${{ toJSON(vars) }}
+      - uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ env.ROLE_ARN }}
+          aws-region: ${{ env.TG_AWS_REGION }}
+          allowed-account-ids: ${{ env.TG_ACCOUNT_ID }}
+          unset-current-credentials: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: plan-prod-${{ github.sha }}-${{ github.run_id }}
+          path: dist/plans
+      - name: Apply the approved saved prod plan
+        run: |
+          python3 .github/scripts/image.py resolve
+          python3 .github/scripts/plan.py verify prod
+          bash .github/scripts/assert-main.sh
+          make apply ENV=prod
+      - name: Verify prod
+        run: bash .github/scripts/verify-deployment.sh prod

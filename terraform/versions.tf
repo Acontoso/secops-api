@@ -1,9 +1,9 @@
-provider "aws" {
-  region = local.aws_region
-}
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
 terraform {
-  backend "s3" {}
+  required_version = ">= 1.15.6, < 2.0"
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "~> 6.0"
+    }
+  }
 }

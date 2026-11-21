@@ -44,8 +44,6 @@ func NewAbuseIPDBClient() *AbuseIPDBClient {
 
 // CheckIP queries AbuseIPDB for a single IP.
 func (abuse *AbuseIPDBClient) CheckIP(c *gin.Context, ip string, ssmClient *ssm.Client, kmsClient *kms.Client, lg *slog.Logger) (*AbuseIPDBResponse, error) {
-	ctx, cancel := context.WithTimeout(c, abuse.Timeout)
-	defer cancel()
 	if abuse.HTTP == nil {
 		abuse.HTTP = &http.Client{Timeout: 5 * time.Second}
 	}
@@ -55,6 +53,8 @@ func (abuse *AbuseIPDBClient) CheckIP(c *gin.Context, ip string, ssmClient *ssm.
 	if abuse.BaseURL == "" {
 		abuse.BaseURL = "https://api.abuseipdb.com/api/v2/check"
 	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), abuse.Timeout)
+	defer cancel()
 	q := url.Values{}
 	q.Set("ipAddress", ip)
 
@@ -64,6 +64,9 @@ func (abuse *AbuseIPDBClient) CheckIP(c *gin.Context, ip string, ssmClient *ssm.
 		return nil, err
 	}
 	apiKey, err := GetParam(c, ssmClient, kmsClient, "ipabuse_db", lg)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Key", apiKey)
 	req.Header.Set("Accept", "application/json")
 	resp, err := abuse.HTTP.Do(req)

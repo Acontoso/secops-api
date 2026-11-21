@@ -14,7 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// AbuseIPDBClient wraps HTTP access to the AbuseIPDB API with timeouts.
+// AnomaliClient wraps HTTP access to the Anomali API with timeouts.
 type AnomaliClient struct {
 	HTTP    *http.Client
 	BaseURL string
@@ -34,21 +34,21 @@ type AnomaliResponse struct {
 	Confidence int `json:"average_confidence"`
 }
 
-// CheckIP queries AbuseIPDB for a single IP.
-func (abuse *AnomaliClient) CheckIOC(c *gin.Context, ioc string, ssmClient *ssm.Client, kmsClient *kms.Client, lg *slog.Logger) (int, error) {
-	ctx, cancel := context.WithTimeout(c, abuse.Timeout)
+// CheckIOC queries Anomali for the confidence score of a single IOC.
+func (anomali *AnomaliClient) CheckIOC(c *gin.Context, ioc string, ssmClient *ssm.Client, kmsClient *kms.Client, lg *slog.Logger) (int, error) {
+	if anomali.HTTP == nil {
+		anomali.HTTP = &http.Client{Timeout: 5 * time.Second}
+	}
+	if anomali.Timeout <= 0 {
+		anomali.Timeout = 5 * time.Second
+	}
+	if anomali.BaseURL == "" {
+		anomali.BaseURL = "https://api.threatstream.com/api/v1/inteldetails/confidence_trend/"
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), anomali.Timeout)
 	defer cancel()
-	if abuse.HTTP == nil {
-		abuse.HTTP = &http.Client{Timeout: 5 * time.Second}
-	}
-	if abuse.Timeout <= 0 {
-		abuse.Timeout = 5 * time.Second
-	}
-	if abuse.BaseURL == "" {
-		abuse.BaseURL = "https://api.threatstream.com/api/v1/inteldetails/confidence_trend/"
-	}
 	// Build URL with query parameters
-	parsedURL, err := url.Parse(abuse.BaseURL)
+	parsedURL, err := url.Parse(anomali.BaseURL)
 	if err != nil {
 		lg.Error("failed to parse base url", "error", err)
 		return 0, err
@@ -65,9 +65,15 @@ func (abuse *AnomaliClient) CheckIOC(c *gin.Context, ioc string, ssmClient *ssm.
 		return 0, err
 	}
 	apiKey, err := GetParam(c, ssmClient, kmsClient, "anomali_api", lg)
+	if err != nil {
+		return 0, err
+	}
 	anomaliUser, err := GetParam(c, ssmClient, kmsClient, "anomali_user", lg)
+	if err != nil {
+		return 0, err
+	}
 	req.Header.Set("Authorization", fmt.Sprintf("apikey %s:%s", anomaliUser, apiKey))
-	resp, err := abuse.HTTP.Do(req)
+	resp, err := anomali.HTTP.Do(req)
 	if err != nil {
 		return 0, err
 	}

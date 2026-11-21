@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 
 	appcontainer "github.com/Acontoso/soar-api/code/app"
@@ -17,6 +18,21 @@ import (
 )
 
 var ginLambda *ginadapter.GinLambda
+
+func buildRouter(app *appcontainer.App) *gin.Engine {
+	router := app.Router
+	router.Use(middleware.JSONLogger(), gin.Recovery())
+	router.GET("/", healthHandler)
+	router.GET("/health", healthHandler)
+
+	// Pass app to route setup
+	routes.SetupProtectedRoutes(app)
+	return router
+}
+
+func healthHandler(c *gin.Context) {
+	c.String(http.StatusOK, "API is healthy!")
+}
 
 func main() {
 	// Gin makes a goroutine per request, so doesnt block or slow other requests
@@ -64,16 +80,7 @@ func main() {
 		RecordedFuture: recordedFutureClient,
 	}
 
-	app.Router.Use(middleware.JSONLogger(), gin.Recovery())
-	app.Router.GET("/", func(c *gin.Context) {
-		c.String(200, "API is healthy!")
-	})
-	app.Router.GET("/health", func(c *gin.Context) {
-		c.String(200, "API is healthy!")
-	})
-
-	// Pass app to route setup
-	routes.SetupProtectedRoutes(app)
+	buildRouter(app)
 
 	slog.Info("API application is starting... and successfully initialized")
 

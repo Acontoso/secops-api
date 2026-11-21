@@ -1,44 +1,43 @@
-data "aws_cognito_identity_pool" "identity_pool_oidc" {
-  identity_pool_name = var.identity_pool_name
-}
+data "aws_region" "current" {}
+data "aws_partition" "current" {}
 
-resource "aws_cognito_user_pool" "oidc_userpool" {
-  name           = var.cognito_oidc_userpool
+resource "aws_cognito_user_pool" "this" {
+  name           = var.name
   user_pool_tier = "LITE"
-  tags           = var.tags
+  admin_create_user_config { allow_admin_create_user_only = true }
+  tags = var.tags
 }
 
-resource "aws_cognito_user_pool_domain" "cognito_domain" {
-  domain       = var.cognito_domain_name
-  user_pool_id = aws_cognito_user_pool.oidc_userpool.id
+resource "aws_cognito_user_pool_domain" "this" {
+  domain       = var.domain
+  user_pool_id = aws_cognito_user_pool.this.id
 }
 
-resource "aws_cognito_resource_server" "soar_api_resource_server" {
-  identifier = "soar-api"
-  name       = "SOAR API"
-
-  scope {
-    scope_name        = "admin.readwrite.all"
-    scope_description = "Scope that has full access to the API"
+resource "aws_cognito_resource_server" "this" {
+  identifier   = var.resource_server_identifier
+  name         = var.name
+  user_pool_id = aws_cognito_user_pool.this.id
+  dynamic "scope" {
+    for_each = var.scopes
+    content {
+      scope_name        = scope.key
+      scope_description = scope.value
+    }
   }
-
-  scope {
-    scope_name        = "ioc.lookup.all"
-    scope_description = "Scope that has full access to the API"
-  }
-
-  user_pool_id = aws_cognito_user_pool.oidc_userpool.id
 }
 
-resource "aws_cognito_user_pool_client" "az_logic_apps_client" {
-  name                                 = var.cognito_oidc_client_app
+# Cognito necessarily persists the generated client secret in Terraform state.
+# Retrieve/distribute it out of band; do not expose it as a module output.
+resource "aws_cognito_user_pool_client" "this" {
+  name                                 = "${var.name}-machine"
+  user_pool_id                         = aws_cognito_user_pool.this.id
   generate_secret                      = true
-  access_token_validity                = 1
-  refresh_token_validity               = 1
   allowed_oauth_flows_user_pool_client = true
   allowed_oauth_flows                  = ["client_credentials"]
-  allowed_oauth_scopes                 = ["soar-api/admin.readwrite.all"]
+  allowed_oauth_scopes                 = [for s in var.client_scopes : "${aws_cognito_resource_server.this.identifier}/${s}"]
+  access_token_validity                = 1
   enable_token_revocation              = true
+  prevent_user_existence_errors        = "ENABLED"
   explicit_auth_flows                  = ["ALLOW_REFRESH_TOKEN_AUTH"]
-  user_pool_id                         = aws_cognito_user_pool.oidc_userpool.id
+  supported_identity_providers         = ["COGNITO"]
 }

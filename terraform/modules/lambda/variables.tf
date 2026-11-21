@@ -1,104 +1,112 @@
-variable "lambda_function_name" {
+variable "name" {
   type        = string
-  description = "Name of lambda function"
+  description = "Lambda function name."
+  validation {
+    condition     = can(regex("^[A-Za-z0-9_-]{1,64}$", var.name))
+    error_message = "Use a valid Lambda function name of at most 64 characters."
+  }
 }
 
-variable "runtime" {
+variable "image_uri" {
   type        = string
-  description = "Lambda runtime language and version"
+  description = "Immutable ECR image digest URI."
+  validation {
+    condition     = can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[a-z0-9-]+\\.amazonaws\\.com(\\.cn)?/[a-z0-9._/-]+@sha256:[a-f0-9]{64}$", var.image_uri))
+    error_message = "Use an ECR image URI pinned to a lowercase sha256 digest."
+  }
 }
 
-variable "handler" {
+variable "architecture" {
   type        = string
-  description = "Specify file & main entry point of Lambda function"
+  description = "Image CPU architecture."
+  default     = "x86_64"
+  validation {
+    condition     = contains(["x86_64", "arm64"], var.architecture)
+    error_message = "Architecture must be x86_64 or arm64."
+  }
 }
 
 variable "memory_size" {
-  type        = string
-  description = "Size of memory to allocate Lambda function during runtime"
+  type        = number
+  description = "Memory allocation in MB."
+  default     = 512
+  validation {
+    condition     = var.memory_size >= 128 && var.memory_size <= 10240 && floor(var.memory_size) == var.memory_size
+    error_message = "Memory must be an integer between 128 and 10240."
+  }
 }
 
 variable "timeout" {
   type        = number
-  description = "Lambda function timeout"
+  description = "Timeout in seconds."
+  default     = 30
+  validation {
+    condition     = var.timeout >= 1 && var.timeout <= 900 && floor(var.timeout) == var.timeout
+    error_message = "Timeout must be an integer between 1 and 900."
+  }
 }
 
-variable "description" {
-  type        = string
-  description = "Description of the Lambda function"
+variable "reserved_concurrent_executions" {
+  type        = number
+  description = "Reserved concurrency; -1 uses the unreserved pool."
+  default     = -1
+  validation {
+    condition     = var.reserved_concurrent_executions >= -1 && floor(var.reserved_concurrent_executions) == var.reserved_concurrent_executions
+    error_message = "Reserved concurrency must be an integer at least -1."
+  }
 }
 
-variable "sns_topic_arn" {
+variable "environment_variables" {
+  type        = map(string)
+  description = "Non-secret runtime configuration."
+  default     = {}
+}
+
+variable "log_retention_days" {
+  type        = number
+  description = "CloudWatch log retention in days."
+  default     = 30
+  validation {
+    condition     = contains([1, 3, 5, 7, 14, 30, 60, 90, 120, 150, 180, 365, 400, 545, 731, 1096, 1827, 2192, 2557, 2922, 3288, 3653], var.log_retention_days)
+    error_message = "Select a supported finite CloudWatch retention period."
+  }
+}
+
+variable "tracing_enabled" {
+  type        = bool
+  description = "Enable X-Ray active tracing."
+  default     = true
+}
+
+variable "policy_statements" {
+  type        = list(object({ sid = string, actions = list(string), resources = list(string) }))
+  description = "Explicit application permissions, including KMS publish permissions for encrypted destinations."
+  default     = []
+  validation {
+    condition     = alltrue([for s in var.policy_statements : length(s.actions) > 0 && length(s.resources) > 0 && alltrue([for r in s.resources : r != "*"])])
+    error_message = "Policy statements require actions and explicitly scoped resources."
+  }
+}
+
+variable "failure_notifications_enabled" {
+  type        = bool
+  description = "Enable failure destination and alarms. Separate from the ARN so a newly created topic can be used in the same plan."
+  default     = false
+}
+
+variable "failure_topic_arn" {
   type        = string
-  description = "ARN of the SNS topic to allow failures to be published from the Lambda function"
+  description = "Optional SNS asynchronous failure destination and Errors/Throttles alarm topic. Supply KMS permissions separately."
+  default     = null
+  validation {
+    condition     = var.failure_topic_arn == null ? true : can(regex("^arn:[^:]+:sns:[^:]+:[0-9]{12}:[^:]+$", var.failure_topic_arn))
+    error_message = "Failure destination must be an SNS topic ARN."
+  }
 }
 
 variable "tags" {
   type        = map(string)
-  description = "Tags to apply to the gateway"
+  description = "Resource tags."
+  default     = {}
 }
 
-variable "s3_bucket_name" {
-  type        = string
-  description = "Name of the S3 bucket to store Lambda code"
-}
-
-variable "dynamodb_table_name_ioc" {
-  type        = string
-  description = "Name of DynamoDB table for IOCs"
-}
-
-variable "dynamodb_primary_key_ioc" {
-  type        = string
-  description = "Primary key of DynamoDB table for IOCs"
-}
-
-variable "dynamodb_sort_key_ioc" {
-  type        = string
-  description = "Sort key of DynamoDB table for IOCs"
-}
-
-variable "dynamodb_table_name_actions" {
-  type        = string
-  description = "Name of DynamoDB table for SOAR actions"
-}
-
-variable "dynamodb_primary_key_actions" {
-  type        = string
-  description = "Primary key of DynamoDB table for SOAR actions"
-}
-
-variable "dynamodb_sort_key_actions" {
-  type        = string
-  description = "Sort key of DynamoDB table for SOAR actions"
-}
-
-variable "ms_tenant_id" {
-  type        = string
-  description = "Microsoft tenant ID for SOAR integration"
-}
-
-variable "identity_pool_id" {
-  type        = string
-  description = "Cognito Identity Pool ID for SOAR integration"
-}
-
-variable "identity_pool_login" {
-  type        = string
-  description = "Cognito Identity Pool login key for SOAR integration"
-}
-
-variable "dynamodb_table_arn_ioc" {
-  type        = string
-  description = "ARN of the DynamoDB table for IOCs"
-}
-
-variable "dynamodb_table_arn_actions" {
-  type        = string
-  description = "ARN of the DynamoDB table for SOAR actions"
-}
-
-variable "cognito_identity_pool_arn" {
-  type        = string
-  description = "ARN of the Cognito Identity Pool"
-}

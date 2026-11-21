@@ -9,11 +9,8 @@ const (
 	High   ConfidenceLevel = "High"
 )
 
-// GetMaliciousConfidenceLevel returns the confidence level based on the score
-// Score ranges:
-// 0-30: low
-// 30-70: medium
-// 70-100: high
+// GetMaliciousConfidenceLevel returns Low for scores below 30, Medium for scores
+// from 30 through 69, and High for scores of 70 or more.
 func GetMaliciousConfidenceLevel(score int) ConfidenceLevel {
 	switch {
 	case score >= 70:

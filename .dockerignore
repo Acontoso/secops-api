@@ -1,0 +1,19 @@
+# Allow only the module metadata and Go source needed by the build.
+# Everything else (Git, Terraform state, credentials, env files, binaries,
+# local caches, and build outputs) stays outside the build context.
+**
+!Dockerfile
+!.dockerignore
+!code/
+!code/**/
+!code/go.mod
+!code/go.sum
+!code/**/*.go
+code/**/*_test.go
+# Never admit generated/cache/vendor trees even if they contain Go files.
+code/**/.*/**
+code/**/vendor/**
+code/**/testdata/**
+code/**/tmp/**
+code/**/bin/**
+code/**/dist/**

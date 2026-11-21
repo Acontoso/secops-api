@@ -1,107 +1,39 @@
-resource "aws_dynamodb_table" "ioc_table" {
-  name                        = var.dynamodb_table_name_ioc
+resource "aws_dynamodb_table" "this" {
+  name                        = var.name
   billing_mode                = "PAY_PER_REQUEST"
-  deletion_protection_enabled = true
-  hash_key                    = var.dynamodb_primary_key_ioc
-  range_key                   = var.dynamodb_sort_key_ioc
-
-  attribute {
-    name = "IOC"
-    type = "S"
+  hash_key                    = var.hash_key
+  range_key                   = var.range_key
+  deletion_protection_enabled = var.deletion_protection_enabled
+  dynamic "attribute" {
+    for_each = var.attributes
+    content {
+      name = attribute.key
+      type = attribute.value
+    }
   }
-
-  attribute {
-    name = "IOCType"
-    type = "S"
+  dynamic "global_secondary_index" {
+    for_each = { for i in var.global_secondary_indexes : i.name => i }
+    content {
+      name            = global_secondary_index.value.name
+      hash_key        = global_secondary_index.value.hash_key
+      range_key       = global_secondary_index.value.range_key
+      projection_type = global_secondary_index.value.projection_type
+    }
   }
-
-  attribute {
-    name = "EnrichmentSource"
-    type = "S"
+  point_in_time_recovery { enabled = var.point_in_time_recovery_enabled }
+  dynamic "ttl" {
+    for_each = var.ttl_attribute == null ? [] : [var.ttl_attribute]
+    content {
+      attribute_name = ttl.value
+      enabled        = true
+    }
   }
-
-  attribute {
-    name = "Date"
-    type = "S"
-  }
-
-  attribute {
-    name = "IncidentID"
-    type = "S"
-  }
-
-  attribute {
-    name = "MaliciousConfidence"
-    type = "S"
-  }
-
-  point_in_time_recovery {
-    enabled = true
-  }
-  global_secondary_index {
-    hash_key        = "IOCType"
-    name            = "IOCTypeDate"
-    projection_type = "ALL"
-    range_key       = "Date"
-  }
-  global_secondary_index {
-    hash_key        = "IOCType"
-    name            = "IOCTypeConfidence"
-    projection_type = "ALL"
-    range_key       = "MaliciousConfidence"
-  }
-  global_secondary_index {
-    hash_key        = "IOCType"
-    name            = "IOCTypeIncident"
-    projection_type = "ALL"
-    range_key       = "IncidentID"
-  }
-  tags = var.tags
-}
-
-resource "aws_dynamodb_table" "actions_table" {
-  name                        = var.dynamodb_table_name_actions
-  billing_mode                = "PAY_PER_REQUEST"
-  deletion_protection_enabled = true
-  hash_key                    = var.dynamodb_primary_key_actions
-  range_key                   = var.dynamodb_sort_key_actions
-
-  attribute {
-    name = "IOC"
-    type = "S"
-  }
-
-  attribute {
-    name = "Integration"
-    type = "S"
-  }
-
-  attribute {
-    name = "Date"
-    type = "S"
-  }
-
-  attribute {
-    name = "IncidentID"
-    type = "S"
-  }
-
-  global_secondary_index {
-    hash_key        = "IOC"
-    name            = "IOCIncident"
-    projection_type = "ALL"
-    range_key       = "IncidentID"
-  }
-
-  global_secondary_index {
-    hash_key        = "IOC"
-    name            = "IOCDate"
-    projection_type = "ALL"
-    range_key       = "Date"
-  }
-
-  point_in_time_recovery {
-    enabled = true
+  dynamic "server_side_encryption" {
+    for_each = var.kms_key_arn == null ? [] : [var.kms_key_arn]
+    content {
+      enabled     = true
+      kms_key_arn = server_side_encryption.value
+    }
   }
   tags = var.tags
 }

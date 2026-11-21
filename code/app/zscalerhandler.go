@@ -30,8 +30,7 @@ func (a *App) SSEBlock(c *gin.Context) {
 	lg := middleware.GetLogger(c)
 	lg.Info("Zscaler Block IOC", "path", c.FullPath())
 	if err := strictBindJSON(c, &sseUpload); err != nil {
-		lg.Error("Error, failed to deserialise into JSON", "error", err)
-		c.JSON(400, gin.H{"Error": "Payload failed to deserialise into JSON"})
+		respondBindError(c, lg, err)
 		return
 	}
 	if err := validate.Struct(sseUpload); err != nil {
@@ -44,77 +43,18 @@ func (a *App) SSEBlock(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	iocs := sseUpload.IOCs
-	incidentId := sseUpload.IncidentID
-	zscalerClientID, err := services.GetParam(c, a.SSM, a.KMS, "zscaler_client_id", lg)
+	accessToken, err := a.zscalerAccessToken(ctx, c, lg)
 	if err != nil {
-		lg.Error("failed to get zscaler client id", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
 		return
 	}
-	zscalerClientSecret, err := services.GetParam(c, a.SSM, a.KMS, "zscaler_client_secret", lg)
-	if err != nil {
-		lg.Error("failed to get zscaler client secret", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		return
-	}
-	AzureADClient, err := services.NewAzureADClient(zscalerClientID, zscalerClientSecret, lg)
-	if err != nil {
-		lg.Error("failed to create AzureAD client", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		return
-	}
-	accessToken, err := AzureADClient.GetAccessTokenSecret(ctx, SCOPE)
-	if err != nil {
-		lg.Error("Failed to get access token from Azure AD", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal server error"})
-		return
-	}
-	// Channel to collect results
-	results := make(chan SSEIOCResult, len(iocs))
-	// Process each IOC concurrently
-	for _, ioc := range iocs {
-		go func(ioc string) {
-			result, err := a.blockSingleIOC(c, ioc, incidentId, accessToken, lg)
-			// Passes the result /value back to a channel
-			// Critical: The number of goroutines must match the number of times you read from the channel
-			results <- SSEIOCResult{Response: result, Error: err}
-		}(ioc)
-	}
-	var responses []models.SSEUploadResponsePayload
-	successCount := 0
-	failureCount := 0
-
-	for i := 0; i < len(iocs); i++ {
-		// This will block until a result is available, go routine has completed execution
-		// the <- means receive from channel that was passed from go routine back into the main function
-		result := <-results
-		if result.Error != nil {
-			lg.Error("failed to block IOC", "error", result.Error)
-			result.Response.Added = false
-			result.Response.Action = "Failed"
-			failureCount++
-		} else if result.Response.Added {
-			successCount++
-		} else {
-			failureCount++
-		}
-		responses = append(responses, result.Response)
-	}
+	batchResponse := a.blockZscalerIOCs(c, sseUpload.IOCs, sseUpload.IncidentID, accessToken, lg)
 	_, activateErr := services.ActivateChange(c, accessToken, lg)
 	if activateErr != nil {
 		lg.Error("Failed to activate zscaler change", "error", activateErr)
 	}
-	batchResponse := models.SSEUploadBatchResponsePayload{
-		Results: responses,
-		Summary: models.SSEUploadSummary{
-			Total:     len(iocs),
-			Succeeded: successCount,
-			Failed:    failureCount,
-		},
-	}
 	// Use 200 for all success, 207 for partial failure
-	if failureCount == 0 {
+	if batchResponse.Summary.Failed == 0 {
 		c.JSON(200, batchResponse)
 	} else {
 		c.JSON(207, batchResponse)
@@ -175,18 +115,13 @@ func (a *App) blockSingleIOC(c *gin.Context, ioc string, incidentId string, acce
 		}, fmt.Errorf("Internal server error for IOC %s", ioc)
 	}
 	if result {
-		loc, _ := time.LoadLocation("Australia/Sydney")
 		soarEntry := &models.SOARTable{
 			IOC:         ioc,
 			Integration: "Zscaler",
-			Date:        time.Now().In(loc).Format("02-01-2006"),
+			Date:        sydneyDate(time.Now()),
 			IncidentID:  incidentId,
 		}
-		err = database.PutItemSOAR(c, a.Dynamo, lg, soarEntry)
-		if err != nil {
-			lg.Error("failed to put item into dynamodb", "error", err)
-			// continue even if we fail to store
-		}
+		a.saveSOARRecord(c, lg, soarEntry)
 	}
 	return models.SSEUploadResponsePayload{
 		Added:       result,

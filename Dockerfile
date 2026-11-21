@@ -1,32 +1,28 @@
-FROM golang:1.22-alpine AS build_go_stage
+FROM --platform=$BUILDPLATFORM golang:1.25.14-bookworm@sha256:3b4a11519ad929d1e1d261a12cff056f0c85b735253d7d861346b9c6f8b36437 AS builder
 
-RUN apk add --no-cache git ca-certificates tzdata gcc musl-dev
-
-WORKDIR /app/server
-
+ENV GOTOOLCHAIN=local CGO_ENABLED=0
+WORKDIR /src
 COPY code/go.mod code/go.sum ./
-RUN go mod download && go mod verify
+RUN --mount=type=cache,target=/go/pkg/mod go mod download && go mod verify
 
 COPY code/ ./
-# CGO_ENABLED: Makes go binary statically linked and does not rely on system C libaries, important for docker alpine images
-# GOOS: Target OS to build on
-# GOARCH: Target CPU architecture to build on
-# ldflags "-w -s": Strip debug information to reduce binary size (harder to reverse engineer FF)
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-w -s" -o bootstrap
+ARG TARGETOS
+ARG TARGETARCH
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -tags=lambda.norpc -trimpath -ldflags="-s -w" -o /out/bootstrap .
 
-# Final runtime image
-FROM alpine:3.20
-
-# Create non-root user BEFORE copying files so chown is correct
-RUN addgroup -g 1001 -S appuser && \
-    adduser -u 1001 -S appuser -G appuser
-
-WORKDIR /app
-
-COPY --from=build_go_stage --chown=appuser:appuser /app/server/bootstrap .
-
-USER appuser
-
+FROM scratch AS http
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder --chmod=0555 /out/bootstrap /bootstrap
+USER 10001:10001
 EXPOSE 8080
+ENTRYPOINT ["/bootstrap"]
 
-CMD ["./bootstrap"]
+FROM public.ecr.aws/lambda/provided:al2023.2026.11.20.02@sha256:35c709c73084df1afa66f7bd46a0be6b95db9da27fa93bd7e45b10701d7e4964 AS lambda
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder --chmod=0555 /out/bootstrap /var/task/bootstrap
+USER 10001:10001
+ENTRYPOINT ["/var/task/bootstrap"]
+CMD []

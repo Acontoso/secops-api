@@ -1,0 +1,35 @@
+# Terraform/Terragrunt: commit provider locks, never state or plans.
+**/.terraform/*
+**/.terragrunt-cache/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan
+crash.log
+crash.*.log
+.terraform.tfstate.lock.info
+**/backend.generated.tf
+**/provider.generated.tf
+**/debug.tfvars
+**/terragrunt-debug.tfvars.json
+# Local Terragrunt overrides.
+terraform/environments/**/local.hcl
+
+# Deployment artifacts: images, digests and saved plans stay out of VCS.
+dist/
+
+# Credentials and local configuration.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.aws/
+
+# Build/test outputs.
+code/bootstrap
+code/server
+bin/
+coverage.out
+*.test
+.DS_Store

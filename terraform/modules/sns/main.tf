@@ -1,22 +1,45 @@
-module "sns" {
-  #checkov:skip=CKV_TF_1: "Ensure Terraform module sources use a commit hash"
-  #checkov:skip=CKV2_AWS_73: "Ensure AWS SQS uses CMK not AWS default keys for encryption"
-  source  = "cloudposse/sns-topic/aws"
-  version = "0.21.0" #github release, linked to commit hash
+data "aws_caller_identity" "current" {}
+data "aws_partition" "current" {}
 
-  name                                   = var.sns_topic_name
-  allowed_aws_services_for_sns_published = ["lambda.amazonaws.com"]
-  encryption_enabled                     = false
+resource "aws_sns_topic" "this" {
+  name              = var.name
+  kms_master_key_id = var.kms_key_arn
+  tags              = var.tags
+}
 
-  subscribers = {
-    internal = {
-      protocol               = "email"
-      endpoint               = "email@email.com"
-      endpoint_auto_confirms = false
-      raw_message_delivery   = false
-    }
-  }
+# Sole owner of the topic policy. Lambda publishers are authorized by IAM; the
+# policy admits the account and CloudWatch alarms restricted to this service's
+# alarm-name pattern.
+resource "aws_sns_topic_policy" "this" {
+  arn = aws_sns_topic.this.arn
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid       = "OwnerAccess"
+        Effect    = "Allow"
+        Principal = { AWS = "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:root" }
+        Action    = "SNS:*"
+        Resource  = aws_sns_topic.this.arn
+      },
+      {
+        Sid       = "CloudWatchAlarms"
+        Effect    = "Allow"
+        Principal = { Service = "cloudwatch.amazonaws.com" }
+        Action    = "sns:Publish"
+        Resource  = aws_sns_topic.this.arn
+        Condition = {
+          StringEquals = { "aws:SourceAccount" = data.aws_caller_identity.current.account_id }
+          ArnLike      = { "aws:SourceArn" = var.alarm_source_arn_pattern }
+        }
+      }
+    ]
+  })
+}
 
-  sqs_dlq_enabled = false
-  tags            = var.tags
+resource "aws_sns_topic_subscription" "this" {
+  for_each  = var.subscriptions
+  topic_arn = aws_sns_topic.this.arn
+  protocol  = each.value.protocol
+  endpoint  = each.value.endpoint
 }

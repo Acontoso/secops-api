@@ -24,8 +24,7 @@ func (a *App) AnomaliLookup(c *gin.Context) {
 	lg := middleware.GetLogger(c)
 	lg.Info("anomali lookup", "path", c.FullPath())
 	if err := strictBindJSON(c, &anomaliLookup); err != nil {
-		lg.Error("Error, failed to deserialise into JSON", "error", err)
-		c.JSON(400, gin.H{"Error": "Payload failed to deserialise into JSON"})
+		respondBindError(c, lg, err)
 		return
 	}
 	if err := validate.Struct(anomaliLookup); err != nil {
@@ -48,16 +47,7 @@ func (a *App) AnomaliLookup(c *gin.Context) {
 		info := data.Info
 		confidence := data.MaliciousConfidence
 		iocType := data.IOCType
-		// DynamoDB numbers unmarshal as float64
-		score := 0
-		if scoreVal, ok := info["Score"]; ok {
-			switch v := scoreVal.(type) {
-			case float64:
-				score = int(v)
-			case int:
-				score = v
-			}
-		}
+		score := scoreFromInfo(info)
 		c.JSON(200, models.AnomaliResponsePayload{
 			Confidence: confidence,
 			IOCType:    iocType,
@@ -91,23 +81,18 @@ func (a *App) AnomaliLookup(c *gin.Context) {
 		return
 	}
 	confidenceLevel := models.GetMaliciousConfidenceLevel(confidence)
-	loc, _ := time.LoadLocation("Australia/Sydney")
 	iocEntry := &models.IOCTable{
 		IOC:                 ioc,
 		IncidentID:          incidentId,
 		IOCType:             iocType,
 		EnrichmentSource:    "Anomali",
 		MaliciousConfidence: string(confidenceLevel),
-		Date:                time.Now().In(loc).Format("02-01-2006"),
+		Date:                sydneyDate(time.Now()),
 		Info: map[string]interface{}{
 			"Score": confidence,
 		},
 	}
-	err = database.PutItemIOCFinder(c, a.Dynamo, lg, iocEntry)
-	if err != nil {
-		lg.Error("failed to put item into dynamodb", "error", err)
-		// continue even if we fail to store
-	}
+	a.saveIOCRecord(c, lg, iocEntry)
 	c.JSON(200, models.AnomaliResponsePayload{
 		Confidence: string(confidenceLevel),
 		IOCType:    iocType,
@@ -123,8 +108,7 @@ func (a *App) CABlock(c *gin.Context) {
 	lg := middleware.GetLogger(c)
 	lg.Info("Conditional Access Block IP", "path", c.FullPath())
 	if err := strictBindJSON(c, &calist); err != nil {
-		lg.Error("Error, failed to deserialise into JSON", "error", err)
-		c.JSON(400, gin.H{"Error": "Payload failed to deserialise into JSON"})
+		respondBindError(c, lg, err)
 		return
 	}
 	if err := validate.Struct(calist); err != nil {
@@ -180,11 +164,10 @@ func (a *App) CABlock(c *gin.Context) {
 		return
 	}
 	if result {
-		loc, _ := time.LoadLocation("Australia/Sydney")
 		soarEntry := &models.SOARTable{
 			IOC:         ioc,
 			Integration: "AzureAD",
-			Date:        time.Now().In(loc).Format("02-01-2006"),
+			Date:        sydneyDate(time.Now()),
 			IncidentID:  incidentId,
 			Info: map[string]interface{}{
 				"TenantID": tenantID,
@@ -192,11 +175,7 @@ func (a *App) CABlock(c *gin.Context) {
 				"ListName": "SOAR-API-Locations",
 			},
 		}
-		err = database.PutItemSOAR(c, a.Dynamo, lg, soarEntry)
-		if err != nil {
-			lg.Error("failed to put item into dynamodb", "error", err)
-			// continue even if we fail to store
-		}
+		a.saveSOARRecord(c, lg, soarEntry)
 	}
 	c.JSON(200, models.AzureADCAResponsePayload{
 		IOC:      ioc,
@@ -212,8 +191,7 @@ func (a *App) DATPBlock(c *gin.Context) {
 	lg := middleware.GetLogger(c)
 	lg.Info("DATP Block IOC", "path", c.FullPath())
 	if err := strictBindJSON(c, &datp); err != nil {
-		lg.Error("Error, failed to deserialise into JSON", "error", err)
-		c.JSON(400, gin.H{"Error": "Payload failed to deserialise into JSON"})
+		respondBindError(c, lg, err)
 		return
 	}
 	if err := validate.Struct(datp); err != nil {
@@ -250,18 +228,13 @@ func (a *App) DATPBlock(c *gin.Context) {
 		return
 	}
 	if result {
-		loc, _ := time.LoadLocation("Australia/Sydney")
 		soarEntry := &models.SOARTable{
 			IOC:         ioc,
 			Integration: "DATP",
-			Date:        time.Now().In(loc).Format("02-01-2006"),
+			Date:        sydneyDate(time.Now()),
 			IncidentID:  incidentId,
 		}
-		err = database.PutItemSOAR(c, a.Dynamo, lg, soarEntry)
-		if err != nil {
-			lg.Error("failed to put item into dynamodb", "error", err)
-			// continue even if we fail to store
-		}
+		a.saveSOARRecord(c, lg, soarEntry)
 	}
 	c.JSON(200, models.DATPUploadResponsePayload{
 		IOC:      ioc,

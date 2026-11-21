@@ -1,108 +1,115 @@
 package middleware
 
 import (
-	"fmt"
-	"log"
+	"context"
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
+	"sync"
 
+	"github.com/Acontoso/soar-api/code/config"
 	"github.com/MicahParks/keyfunc/v3"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
-var COGNITOID string = "ap-southeast-2_jL1tizlq8"
-var CLIENTID string = "62l32mjlofb4r3l4po18h9f5bg"
+type jwksLoader func(string) (keyfunc.Keyfunc, error)
 
-func getJWKS(cognitoUserPoolId string) (keyfunc.Keyfunc, error) {
+func getJWKS(issuer string) (keyfunc.Keyfunc, error) {
+	// The cached production key set lives for the application lifetime.
+	return loadJWKS(context.Background(), issuer, nil)
+}
 
-	jwksURL := fmt.Sprintf("https://cognito-idp.ap-southeast-2.amazonaws.com/%s/.well-known/jwks.json", cognitoUserPoolId)
-
-	jwks, err := keyfunc.NewDefault([]string{jwksURL})
-	if err != nil {
-		log.Fatalf("Failed to create JWK Set from resource at the given URL.\nError: %s", err)
+// loadJWKS allows an owner to cancel refresh workers and supply an offline HTTP
+// client without changing any process-wide transport or factory.
+func loadJWKS(ctx context.Context, issuer string, client *http.Client) (keyfunc.Keyfunc, error) {
+	urls := []string{issuer + "/.well-known/jwks.json"}
+	if client != nil {
+		return keyfunc.NewDefaultOverrideCtx(ctx, urls, keyfunc.Override{Client: client})
 	}
-	return jwks, nil
+	return keyfunc.NewDefaultCtx(ctx, urls)
+}
+
+// bearerToken follows the Bearer grammar: a case-insensitive scheme, one or
+// more ASCII spaces, then a nonempty token without surrounding whitespace.
+func bearerToken(header string) (string, bool) {
+	scheme, token, ok := strings.Cut(header, " ")
+	if !ok || !strings.EqualFold(scheme, "Bearer") {
+		return "", false
+	}
+	token = strings.TrimLeft(token, " ")
+	if token == "" || strings.ContainsAny(token, " \t\r\n\v\f") {
+		return "", false
+	}
+	return token, true
 }
 
 func CognitoAuthMiddleware() gin.HandlerFunc {
+	cfg, err := config.LoadCognito(context.Background())
+	if err != nil {
+		slog.Error("Cognito authorization configuration is invalid", "error", err)
+		return func(c *gin.Context) {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		}
+	}
+	return cognitoAuthMiddleware(cfg, getJWKS)
+}
+
+func cognitoAuthMiddleware(cfg config.Cognito, load jwksLoader) gin.HandlerFunc {
+	// Reuse the refreshing key set instead of spawning a refresh loop per request.
+	// Failed initialization is retried, not made fatal or cached forever.
+	var mu sync.Mutex
+	var jwks keyfunc.Keyfunc
 	return func(c *gin.Context) {
-
-		// Retrieve JWT from the "Authorization" header
-		authHeader := c.GetHeader("Authorization")
-		splitToken := strings.Split(authHeader, "Bearer ")
-
-		if len(splitToken) != 2 {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
+		unauthorized := func() {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		}
-
-		tokenString := splitToken[1]
-
-		if tokenString == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
-		}
-		jwks, err := getJWKS(COGNITOID)
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
-		}
-
-		token, err := jwt.Parse(tokenString,
-			jwks.Keyfunc,
-			jwt.WithValidMethods([]string{"RS256"}),
-			jwt.WithExpirationRequired(),
-			jwt.WithIssuer(fmt.Sprintf("https://cognito-idp.ap-southeast-2.amazonaws.com/%s", COGNITOID)))
-		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
-		}
-
-		// Attempt to parse the JWT claims, properties of JWT tokens into a map of strings to interface{}
-		claims, ok := token.Claims.(jwt.MapClaims)
+		tokenString, ok := bearerToken(c.GetHeader("Authorization"))
 		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unable to parse claims"})
-			// Abort prevents pending handlers from being called, wont stop current handler
-			c.Abort()
+			unauthorized()
 			return
 		}
+		mu.Lock()
+		if jwks == nil {
+			var err error
+			jwks, err = load(cfg.Issuer)
+			if err != nil {
+				mu.Unlock()
+				unauthorized()
+				return
+			}
+		}
+		keys := jwks
+		mu.Unlock()
 
-		// Compare the "exp" claim to the current time
-		expClaim, err := claims.GetExpirationTime()
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unable to get expiration time from JWT token"})
-			c.Abort()
+		token, err := jwt.Parse(tokenString, keys.Keyfunc,
+			jwt.WithValidMethods([]string{"RS256"}),
+			jwt.WithExpirationRequired(), jwt.WithIssuer(cfg.Issuer))
+		if err != nil || !token.Valid {
+			unauthorized()
 			return
 		}
-		if expClaim.Unix() < time.Now().Unix() {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Token has expired"})
-			c.Abort()
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok || claims["token_use"] != "access" || claims["client_id"] != cfg.ClientID {
+			unauthorized()
 			return
 		}
-
-		// "sub" claim exists in both ID and Access tokens
-		subClaim, err := claims.GetSubject()
-		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
+		scope, _ := claims["scope"].(string)
+		hasScope := false
+		for _, value := range strings.Fields(scope) {
+			if value == cfg.RequiredScope {
+				hasScope = true
+				break
+			}
+		}
+		if !hasScope {
+			unauthorized()
 			return
 		}
-		if subClaim != CLIENTID {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
-			c.Abort()
-			return
-		}
-		c.Set("username", subClaim)
-		// Get existing logger (with request_id) and add user_id to it
-		reqLogger := GetLogger(c).With(slog.String("user_id", subClaim))
-		c.Set("logger", reqLogger)
+		// Subject identifies the caller for logging only, never the app client.
+		subject, _ := claims.GetSubject()
+		c.Set("username", subject)
+		c.Set("logger", GetLogger(c).With(slog.String("user_id", subject)))
 		c.Next()
 	}
 }

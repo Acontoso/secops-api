@@ -1,4 +1,3 @@
-output "sns_arn" {
-  description = "ARN of SNS topic created"
-  value = module.sns.sns_topic_arn
+output "topic_arn" {
+  value = aws_sns_topic.this.arn
 }

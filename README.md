@@ -53,7 +53,7 @@ The SOAR API provides a centralized hub for security automation, allowing your t
 #### Frontend & Authentication
 - **API Gateway**: HTTPS endpoint with Cognito-based authorization
 - **Cognito**: OpenID Connect integration for authentication and scoped authorization
-- **API Key Requirements**: Enforced on all endpoints for additional security
+- **Authorization**: Every route requires a Cognito access token with the required OAuth scope
 
 #### Compute & Services
 - **AWS Lambda**: Serverless compute layer running the Go-based API application
@@ -71,8 +71,7 @@ The SOAR API provides a centralized hub for security automation, allowing your t
 ## API Endpoints
 
 All endpoints require:
-- Valid Cognito authentication token
-- API key in request headers
+- Valid Cognito access token with the required scope (client-credentials flow)
 - HTTPS connection
 
 ### Enrichment Routes (`/api/enrich/*`)
@@ -150,18 +149,15 @@ soar-api/
 │   ├── routes/              # Route definitions
 │   │   └── routes.go
 │   └── main.go              # Application entrypoint
-├── terraform/               # Infrastructure as Code
-│   ├── lambda.tf            # Lambda function configuration
-│   ├── apigateway.tf        # API Gateway setup
-│   ├── dynamodb.tf          # DynamoDB table definitions
-│   ├── cognito-oidc.tf      # Cognito authentication
-│   ├── kms.tf               # Key management
-│   ├── ssm.tf               # Parameter store configuration
-│   └── variables.tf         # Configuration variables
-├── workflows/               # CI/CD pipelines
-│   ├── azure-pipelines.yaml # Azure DevOps pipeline
-│   └── ci.yaml              # GitHub Actions
-└── Dockerfile               # Container image definition
+├── terraform/               # Reusable Terraform module + Terragrunt wrappers
+│   ├── main.tf              # Application composition
+│   ├── variables.tf         # Validated inputs
+│   ├── terragrunt.hcl       # Shared provider/backend configuration
+│   ├── environments/        # dev/ and prod/ wrappers (separate accounts)
+│   └── modules/             # Supporting AWS resource modules
+├── .github/workflows/       # Checks, PR plans, gated dev → prod deploys
+├── Makefile                 # Checks, image build/push and plan/apply
+└── Dockerfile               # Lambda and standalone HTTP image targets
 ```
 
 ## Data Flow
@@ -204,17 +200,31 @@ soar-api/
 | **KMS** | Key encryption | Infrastructure |
 | **SSM** | Configuration & secrets | Infrastructure |
 
-## Deployment
+### Prerequisites (existing, not managed by this Terraform)
 
-The API is deployed as a serverless application on AWS using Terraform:
+- Versioned, encrypted S3 state bucket per account
+- One private ECR repository shared by dev and prod, in the same region as both
+  Lambdas, with **immutable tags** (no tag-mutability exclusions). Prod deploys
+  the digest already verified in dev; see `.github/workflows/README.md` for the
+  cross-account repository-policy requirements.
+- External KMS keys (SSM SecureStrings + application ciphertext) and the
+  Azure-integrated Cognito identity pool
+- Vendor credentials in SSM under `/<project>/<env>/…` (base64 KMS ciphertext,
+  decrypted at request time by `code/services/aws.go`)
 
-- **Compute**: AWS Lambda with Go runtime
-- **API Gateway**: HTTPS regional endpoint
-- **Authentication**: AWS Cognito with OIDC
-- **Storage**: DynamoDB for caching and audit logs
-- **Infrastructure State**: Stored in S3 with Terraform
+### Local deployment commands
 
-See `terraform/` directory for infrastructure configuration details.
+```bash
+export TG_ACCOUNT_ID=... TG_STATE_BUCKET=... TG_ECR_REPOSITORY_URL=...   # see environments/<env>/env.hcl
+make check                          # fmt, validate, go vet/gofmt, go test
+make image-push ENV=dev             # build + push; prints the image digest
+TG_IMAGE_DIGEST=sha256:... make plan ENV=dev
+TG_IMAGE_DIGEST=sha256:... make apply ENV=dev
+make output ENV=dev
+```
+
+See [.github/workflows/README.md](.github/workflows/README.md) for the CI/CD
+pipeline, versioning, and required GitHub configuration.
 
 ## Development
 
@@ -225,8 +235,3 @@ go run main.go
 ```
 Runs on `http://localhost:8080`
 
-### Build & Deployment
-Automated via CI/CD pipelines in `workflows/`
-- Tests, linting, and security checks
-- Builds Docker image and Lambda package
-- Deploys infrastructure via Terraform

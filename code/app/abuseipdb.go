@@ -13,18 +13,26 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// bindAbuseIPPayload preserves the shared error responses of the AbuseIP endpoints.
+func bindAbuseIPPayload(c *gin.Context, dst any) bool {
+	if err := strictBindJSON(c, dst); err != nil {
+		c.JSON(400, gin.H{"Error, failed to deserialise into JSON": err.Error()})
+		return false
+	}
+	if err := validate.Struct(dst); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Validation of AbuseIP payload failed", "details": err.Error()})
+		return false
+	}
+	return true
+}
+
 func (a *App) IPLookup(c *gin.Context) {
 	_, cancel := context.WithTimeout(c, 100*time.Second)
 	defer cancel()
 	var abuseIp models.ClientAbuseIPRequestPayload
 	lg := middleware.GetLogger(c)
 	lg.Info("ip lookup", "path", c.FullPath())
-	if err := strictBindJSON(c, &abuseIp); err != nil {
-		c.JSON(400, gin.H{"Error, failed to deserialise into JSON": err.Error()})
-		return
-	}
-	if err := validate.Struct(abuseIp); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Validation of AbuseIP payload failed", "details": err.Error()})
+	if !bindAbuseIPPayload(c, &abuseIp) {
 		return
 	}
 	ip := abuseIp.IP
@@ -48,7 +56,7 @@ func (a *App) IPLookup(c *gin.Context) {
 		})
 		return
 	}
-	data, err := database.GetItemIOCFinder(c, a.Dynamo, ip, "IPAbuseDB", lg)
+	data, err := database.GetItemIOCFinder(c, a.Dynamo, ip, "AbuseIPDB", lg)
 	if errors.Is(err, database.ErrNotFound) {
 		lg.Info("Record not found in Database for IOC", "ip", ip)
 	} else if err != nil {
@@ -100,21 +108,16 @@ func (a *App) IPLookup(c *gin.Context) {
 		"Score":       score,
 	}
 	confidenceLevel := models.GetMaliciousConfidenceLevel(score)
-	loc, _ := time.LoadLocation("Australia/Sydney")
 	iocEntry := &models.IOCTable{
 		IOC:                 ip,
 		IncidentID:          incidentId,
 		IOCType:             "IPv4",
 		EnrichmentSource:    "AbuseIPDB",
 		MaliciousConfidence: string(confidenceLevel),
-		Date:                time.Now().In(loc).Format("02-01-2006"),
+		Date:                sydneyDate(time.Now()),
 		Info:                infoMap,
 	}
-	err = database.PutItemIOCFinder(c, a.Dynamo, lg, iocEntry)
-	if err != nil {
-		lg.Error("failed to put item into dynamodb", "error", err)
-		// continue even if we fail to store
-	}
+	a.saveIOCRecord(c, lg, iocEntry)
 	c.JSON(200, models.ClientAbuseIPResponsePayload{
 		Confidence:           string(confidenceLevel),
 		Country:              respData.CountryName,
@@ -133,12 +136,7 @@ func (a *App) ManualIPLookup(c *gin.Context) {
 	var abuseIp models.ManualLookupIPRequestPayload
 	lg := middleware.GetLogger(c)
 	lg.Info("ip manual lookup", "path", c.FullPath())
-	if err := strictBindJSON(c, &abuseIp); err != nil {
-		c.JSON(400, gin.H{"Error, failed to deserialise into JSON": err.Error()})
-		return
-	}
-	if err := validate.Struct(abuseIp); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Validation of AbuseIP payload failed", "details": err.Error()})
+	if !bindAbuseIPPayload(c, &abuseIp) {
 		return
 	}
 	ip := abuseIp.IP
@@ -160,7 +158,7 @@ func (a *App) ManualIPLookup(c *gin.Context) {
 		})
 		return
 	}
-	data, err := database.GetItemIOCFinder(c, a.Dynamo, ip, "IPAbuseDB", lg)
+	data, err := database.GetItemIOCFinder(c, a.Dynamo, ip, "AbuseIPDB", lg)
 	if errors.Is(err, database.ErrNotFound) {
 		lg.Info("Record not found in Database for IOC", "ip", ip)
 	} else if err != nil {
@@ -207,12 +205,7 @@ func (a *App) ManualPutAbuseIP(c *gin.Context) {
 	var abuseIp models.ManualAddAbuseIPPayload
 	lg := middleware.GetLogger(c)
 	lg.Info("Manual Abuse IP add", "path", c.FullPath())
-	if err := strictBindJSON(c, &abuseIp); err != nil {
-		c.JSON(400, gin.H{"Error, failed to deserialise into JSON": err.Error()})
-		return
-	}
-	if err := validate.Struct(abuseIp); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Validation of AbuseIP payload failed", "details": err.Error()})
+	if !bindAbuseIPPayload(c, &abuseIp) {
 		return
 	}
 	ip := abuseIp.IP
@@ -230,14 +223,13 @@ func (a *App) ManualPutAbuseIP(c *gin.Context) {
 		"Score":       abuseConfidenceScore,
 	}
 	confidenceLevel := models.GetMaliciousConfidenceLevel(abuseConfidenceScore)
-	loc, _ := time.LoadLocation("Australia/Sydney")
 	iocEntry := &models.IOCTable{
 		IOC:                 ip,
 		IncidentID:          incidentID,
 		IOCType:             iocType,
 		EnrichmentSource:    "AbuseIPDB",
 		MaliciousConfidence: string(confidenceLevel),
-		Date:                time.Now().In(loc).Format("02-01-2006"),
+		Date:                sydneyDate(time.Now()),
 		Info:                infoMap,
 	}
 	err := database.PutItemIOCFinder(c, a.Dynamo, lg, iocEntry)

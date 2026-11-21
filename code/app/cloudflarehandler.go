@@ -27,8 +27,7 @@ func (a *App) CloudflareBlock(c *gin.Context) {
 	lg := middleware.GetLogger(c)
 	lg.Info("Cloudflare Block IOC", "path", c.FullPath())
 	if err := strictBindJSON(c, &cloudflareBlockIP); err != nil {
-		lg.Error("Error, failed to deserialise into JSON", "error", err)
-		c.JSON(400, gin.H{"Error": "Payload failed to deserialise into JSON"})
+		respondBindError(c, lg, err)
 		return
 	}
 	if err := validate.Struct(cloudflareBlockIP); err != nil {
@@ -54,28 +53,21 @@ func (a *App) CloudflareBlock(c *gin.Context) {
 	for _, record := range existingData {
 		existingRecords[record.IOC] = record
 	}
-	// Channel to collect results, like a pipe for passing values safetly between go routines
-	// Below defines the channel to pass CloudflareIOCResult structs
+	// Buffer one result per account so workers can finish before results are read.
 	results := make(chan CloudflareIOCResult, len(accounts))
-	// Process each account concurrently, straight away called by go func(), anon function in this case.
-	// Go manages the execution of the go-routines, standard per each new connection (socket design)
-	// Schedules on pool of OS threads, if all threads are busy it will wait until one is free, so no risk of too many go routines being created.
-	// Schedules runable routines and when blocked, sechuled routines are paused until they are runnable again, so if waiting on network response it will be paused until response is back, then it will be runnable again and scheduled to run.
+	// Start one worker per account and receive exactly one result from each below.
 	for _, account := range accounts {
 		go func(account string) {
 			result, err := a.blockIPCloudflare(c, iocs, incidentId, account, existingRecords, lg)
-			// Passes the result /value back to a channel, if there is blockage here the program will hang.
-			// Critical: The number of goroutines must match the number of times you read from the channel
 			results <- CloudflareIOCResult{Response: result, Error: err}
-		}(string(account)) //straight away called by go func(), anon function in this case.
+		}(string(account))
 	}
 	var responses []models.CloudflareBlockIPResponsePayload
 	successCount := 0
 	failureCount := 0
 
 	for i := 0; i < len(accounts); i++ {
-		// This recieves one value at a time, and is looped based on the amount of goroutines started above.
-		// Passes the result back to the main channel
+		// Results arrive in account-completion order.
 		result := <-results
 		lg.Info("DEBUG: Result received", "response_length", len(result.Response), "error", result.Error)
 		if result.Error != nil {
@@ -94,24 +86,39 @@ func (a *App) CloudflareBlock(c *gin.Context) {
 		}
 		responses = append(responses, result.Response...)
 	}
-	loc, _ := time.LoadLocation("Australia/Sydney")
+	addedAccounts := make(map[string]map[string]bool)
+	for _, response := range responses {
+		if response.Added {
+			if addedAccounts[response.IOC] == nil {
+				addedAccounts[response.IOC] = make(map[string]bool)
+			}
+			addedAccounts[response.IOC][response.Account] = true
+		}
+	}
 	for _, ioc := range iocs {
-		// If no existing record, add to SOAR DB after initial operation done
+		// Persist only memberships actually established for this IOC, never
+		// configured/requested accounts whose Cloudflare operation failed.
 		if _, exists := existingRecords[ioc]; !exists {
+			var verifiedAccounts []string
+			for _, account := range accounts {
+				if addedAccounts[ioc][account] {
+					verifiedAccounts = append(verifiedAccounts, account)
+				}
+			}
+			if len(verifiedAccounts) == 0 {
+				continue
+			}
 			infoMap := map[string]interface{}{
-				"Accounts": accounts,
+				"Accounts": verifiedAccounts,
 			}
 			soarEntry := &models.SOARTable{
 				IOC:         ioc,
 				IncidentID:  incidentId,
 				Integration: "Cloudflare",
-				Date:        time.Now().In(loc).Format("02-01-2006"),
+				Date:        sydneyDate(time.Now()),
 				Info:        infoMap,
 			}
-			err = database.PutItemSOAR(c, a.Dynamo, lg, soarEntry)
-			if err != nil {
-				lg.Error("failed to put item into dynamodb", "error", err)
-			}
+			a.saveSOARRecord(c, lg, soarEntry)
 		}
 	}
 
@@ -132,71 +139,53 @@ func (a *App) CloudflareBlock(c *gin.Context) {
 	}
 }
 
-func (a *App) blockIPCloudflare(c *gin.Context, iocs []string, incidentId string, account string, existingRecords map[string]models.SOARTable, lg *slog.Logger) ([]models.CloudflareBlockIPResponsePayload, error) {
+// blockIPCloudflare processes one account in input order. Existing account
+// memberships bypass Cloudflare; only existing records need account updates.
+func (a *App) blockIPCloudflare(c *gin.Context, iocs []string, incidentID string, account string, existingRecords map[string]models.SOARTable, lg *slog.Logger) ([]models.CloudflareBlockIPResponsePayload, error) {
 	var responses []models.CloudflareBlockIPResponsePayload
 	for _, ioc := range iocs {
-		if record, ok := existingRecords[ioc]; ok {
-			info := record.Info
-			var accounts []string
-			if acc, ok := info["Accounts"].([]string); ok {
-				accounts = acc
-			} else if acc, ok := info["Accounts"].([]interface{}); ok {
-				for _, v := range acc {
-					if s, ok := v.(string); ok {
-						accounts = append(accounts, s)
-					}
-				}
-			}
-			if slices.Contains(accounts, account) {
-				responses = append(responses, models.CloudflareBlockIPResponsePayload{
-					Added:   true,
-					IOC:     ioc,
-					Account: account,
-					Action:  "Block",
-				})
-			} else {
-				added, err := services.CloudflareAddIP(c, ioc, account, incidentId, a.SSM, a.KMS, lg)
-				if err != nil {
-					lg.Error("Failed to add IOC to Cloudflare", "ioc", ioc, "error", err)
-					responses = append(responses, models.CloudflareBlockIPResponsePayload{
-						Added:   false,
-						IOC:     ioc,
-						Account: account,
-						Action:  "None",
-					})
-				} else {
-					responses = append(responses, models.CloudflareBlockIPResponsePayload{
-						Added:   added,
-						IOC:     ioc,
-						Account: account,
-						Action:  "Block",
-					})
-					err = database.UpdateItemSOARAccounts(c, a.Dynamo, lg, ioc, "Cloudflare", account)
-					if err != nil {
-						lg.Error("Failed to update SOAR database with new Cloudflare account", "ioc", ioc, "account", account, "error", err)
-					}
-				}
-			}
-		} else {
-			// New IOC - just add to Cloudflare, database write happens in main function
-			added, err := services.CloudflareAddIP(c, ioc, account, incidentId, a.SSM, a.KMS, lg)
-			if err != nil {
-				lg.Error("Failed to add IOC to Cloudflare", "ioc", ioc, "error", err)
-				responses = append(responses, models.CloudflareBlockIPResponsePayload{
-					Added:   false,
-					IOC:     ioc,
-					Account: account,
-					Action:  "None",
-				})
-			} else {
-				responses = append(responses, models.CloudflareBlockIPResponsePayload{
-					Added:   added,
-					IOC:     ioc,
-					Account: account,
-					Action:  "Block",
-				})
+		record, exists := existingRecords[ioc]
+		if exists && slices.Contains(cloudflareAccounts(record.Info), account) {
+			responses = append(responses, models.CloudflareBlockIPResponsePayload{
+				Added: true, IOC: ioc, Account: account, Action: "Block",
+			})
+			continue
+		}
+
+		added, err := services.CloudflareAddIP(c, ioc, account, incidentID, a.SSM, a.KMS, lg)
+		if err != nil {
+			lg.Error("Failed to add IOC to Cloudflare", "ioc", ioc, "error", err)
+			responses = append(responses, models.CloudflareBlockIPResponsePayload{
+				Added: false, IOC: ioc, Account: account, Action: "None",
+			})
+			continue
+		}
+		responses = append(responses, models.CloudflareBlockIPResponsePayload{
+			Added: added, IOC: ioc, Account: account, Action: "Block",
+		})
+
+		// New records are written by CloudflareBlock after all account results.
+		if exists && added {
+			if err := database.UpdateItemSOARAccounts(c, a.Dynamo, lg, ioc, "Cloudflare", account); err != nil {
+				lg.Error("Failed to update SOAR database with new Cloudflare account", "ioc", ioc, "account", account, "error", err)
 			}
 		}
 	}
 	return responses, nil
+}
+
+// cloudflareAccounts accepts both native and DynamoDB-decoded string lists.
+func cloudflareAccounts(info map[string]interface{}) []string {
+	if accounts, ok := info["Accounts"].([]string); ok {
+		return accounts
+	}
+	var accounts []string
+	if values, ok := info["Accounts"].([]interface{}); ok {
+		for _, value := range values {
+			if account, ok := value.(string); ok {
+				accounts = append(accounts, account)
+			}
+		}
+	}
+	return accounts
 }

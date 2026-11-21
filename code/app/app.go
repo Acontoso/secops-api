@@ -13,9 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// Creates a single app container (structure) that holds shared resources
-// Lets handlers access clients from container directly instread of passing into requests contexts
-// Single initialisation in main.go then passed to routes setup
+// App holds shared clients initialized in main and passed to the route handlers.
 type App struct {
 	Router         *gin.Engine
 	Dynamo         *dynamodb.Client
